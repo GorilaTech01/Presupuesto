@@ -40,14 +40,14 @@ const BUDGET = {
       id: "variables", nombre: "Gastos Variables", color: "#f0f0fa", accent: "#5a4fcf", emoji: "🎯",
       rubros: [
         { id: "padel",    nombre: "Pádel",                   limite: 160000 },
-        { id: "salidas",  nombre: "Salidas / novia / cine",   limite: 100000 },
+        { id: "salidas",  nombre: "Salidas",   limite: 100000 },
         { id: "uber",     nombre: "Uber / parqueos",          limite: 30000  },
         { id: "compras",  nombre: "Compras personales",       limite: 50000  },
       ],
     },
     {
       id: "deudas", nombre: "Deudas", color: "#fdf0f0", accent: "#c0392b", emoji: "💳",
-      rubros: [{ id: "mama", nombre: "Pago deuda mamá", limite: 60000 }],
+      rubros: [{ id: "mama", nombre: "Por Pagar", limite: 60000 }],
     },
     {
       id: "ahorro", nombre: "Ahorro", color: "#fffbf0", accent: "#d4890a", emoji: "🏦",
@@ -359,7 +359,7 @@ function App() {
           <div style={{background:"#fff",borderRadius:16,padding:"14px 16px",boxShadow:"0 2px 8px rgba(0,0,0,0.05)",border:"1px dashed #f0a040"}}>
             <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8}}>
               <span style={{fontSize:18}}>🧾</span>
-              <span style={{fontWeight:700,fontSize:15,color:"#1a1a2e"}}>Deuda con mamá</span>
+              <span style={{fontWeight:700,fontSize:15,color:"#1a1a2e"}}>Por Pagar</span>
             </div>
             {[["Saldo inicial","₡430.000","#c0392b"],["Pagos este mes",fmt(getGastado("mama")),"#2d8c6e"]].map(([l,v,c])=>(
               <div key={l} style={{display:"flex",justifyContent:"space-between",marginTop:2}}>
@@ -431,7 +431,7 @@ function App() {
         <div style={{...S.card,background:"#fff8f0",border:"1px dashed #f0a040"}}>
           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
             <span style={{fontSize:18}}>🧾</span>
-            <p style={{margin:0,fontWeight:700,fontSize:14,color:"#222"}}>Deuda con mamá</p>
+            <p style={{margin:0,fontWeight:700,fontSize:14,color:"#222"}}>Por Pagar</p>
           </div>
           <div style={{display:"flex",justifyContent:"space-between"}}>
             <span style={{fontSize:13,color:"#888"}}>Saldo pendiente</span>
