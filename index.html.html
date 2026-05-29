@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Presupuesto" />
+  <title>Presupuesto Gabo</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body { margin: 0; padding: 0; background: #f5f5f7; font-family: -apple-system, 'Helvetica Neue', sans-serif; }
+    #root { max-width: 430px; margin: 0 auto; }
+    input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
+    select { -webkit-appearance: none; appearance: none; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect } = React;
+
+const BUDGET = {
+  salarioNeto: 981840,
+  categorias: [
+    {
+      id: "fijos", nombre: "Gastos Fijos", color: "#e8f4f0", accent: "#2d8c6e", emoji: "📌",
+      rubros: [
+        { id: "desayunos", nombre: "Desayunos trabajo", limite: 44000 },
+        { id: "almuerzos", nombre: "Almuerzos trabajo", limite: 55000 },
+        { id: "gasolina",  nombre: "Gasolina",          limite: 45000 },
+        { id: "celular",   nombre: "Celular",            limite: 13000 },
+        { id: "seguro",    nombre: "Seguro del carro",   limite: 20500 },
+      ],
+    },
+    {
+      id: "variables", nombre: "Gastos Variables", color: "#f0f0fa", accent: "#5a4fcf", emoji: "🎯",
+      rubros: [
+        { id: "padel",    nombre: "Pádel",                   limite: 160000 },
+        { id: "salidas",  nombre: "Salidas / novia / cine",   limite: 100000 },
+        { id: "uber",     nombre: "Uber / parqueos",          limite: 30000  },
+        { id: "compras",  nombre: "Compras personales",       limite: 50000  },
+      ],
+    },
+    {
+      id: "deudas", nombre: "Deudas", color: "#fdf0f0", accent: "#c0392b", emoji: "💳",
+      rubros: [{ id: "mama", nombre: "Pago deuda mamá", limite: 60000 }],
+    },
+    {
+      id: "ahorro", nombre: "Ahorro", color: "#fffbf0", accent: "#d4890a", emoji: "🏦",
+      rubros: [
+        { id: "emergencia", nombre: "Fondo de emergencia", limite: 75000 },
+        { id: "vacaciones", nombre: "Ahorro vacaciones",   limite: 50000 },
+      ],
+    },
+  ],
+};
+
+const QUINCENAL_OVERRIDES = { desayunos: 22000 };
+const STORAGE_KEY = "gabo_budget_v2";
+
+const fmt = n => "₡" + Math.round(n).toLocaleString("es-CR");
+
+function getMesActual() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`;
+}
+function getMesLabel(k) {
+  const [y,m] = k.split("-");
+  return ["Ene","Feb","Mar","Abr","May","Jun","Jul","Ago","Sep","Oct","Nov","Dic"][parseInt(m)-1] + " " + y;
+}
+function getLimiteQ(r) {
+  return QUINCENAL_OVERRIDES[r.id] !== undefined ? QUINCENAL_OVERRIDES[r.id] : Math.round(r.limite/2);
+}
+
+function BarraProgreso({ gastado, limite, accent }) {
+  const pct = Math.min((gastado/limite)*100, 100);
+  const over = gastado > limite;
+  return (
+    <div style={{marginTop:4}}>
+      <div style={{height:6,borderRadius:99,background:"#e8e8e8",overflow:"hidden"}}>
+        <div style={{height:"100%",width:`${pct}%`,borderRadius:99,background:over?"#e74c3c":accent,transition:"width 0.4s ease"}}/>
+      </div>
+    </div>
+  );
+}
+
+function NavBar({ tab, setTab }) {
+  const tabs = [
+    { id:"quincenal", label:"Quincenal", icon:"📆" },
+    { id:"reporte",   label:"Reporte",   icon:"📊" },
+  ];
+  return (
+    <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:430,background:"#fff",borderTop:"1px solid #eee",display:"flex",boxShadow:"0 -4px 20px rgba(0,0,0,0.06)",zIndex:200,paddingBottom:"env(safe-area-inset-bottom)"}}>
+      {tabs.map(t => (
+        <button key={t.id} onClick={() => setTab(t.id)} style={{flex:1,padding:"10px 0 14px",border:"none",background:"none",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+          <span style={{fontSize:20}}>{t.icon}</span>
+          <span style={{fontSize:11,fontWeight:tab===t.id?700:500,color:tab===t.id?"#1a1a2e":"#aaa"}}>{t.label}</span>
+          {tab===t.id && <div style={{width:20,height:3,borderRadius:99,background:"#1a1a2e",marginTop:1}}/>}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function App() {
+  const [datos, setDatos] = useState(() => {
+    try { const s = localStorage.getItem(STORAGE_KEY); return s ? JSON.parse(s) : {}; }
+    catch { return {}; }
+  });
+  const [mes,       setMes]       = useState(getMesActual);
+  const [tab,       setTab]       = useState("quincenal");
+  const [vista,     setVista]     = useState("main");
+  const [catActiva, setCatActiva] = useState(null);
+  const [rubroActivo, setRubroActivo] = useState(null);
+  const [form,      setForm]      = useState({ monto:"", desc:"" });
+  const [alerta,    setAlerta]    = useState(null);
+  const [quincena,  setQuincena]  = useState(1);
+
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(datos)); } catch {}
+  }, [datos]);
+
+  const gastosMes = datos[mes] || {};
+
+  function getGastado(rubroId, soloQ=null) {
+    const lista = gastosMes[rubroId] || [];
+    if (soloQ===null) return lista.reduce((s,t)=>s+t.monto,0);
+    return lista.filter(t=>(t.quincena||1)===soloQ).reduce((s,t)=>s+t.monto,0);
+  }
+  function getTotalCat(cat, soloQ=null) { return cat.rubros.reduce((s,r)=>s+getGastado(r.id,soloQ),0); }
+  function getLimiteCat(cat, modo="mensual") { return cat.rubros.reduce((s,r)=>s+(modo==="quincenal"?getLimiteQ(r):r.limite),0); }
+  function totalGastado(soloQ=null) { return BUDGET.categorias.reduce((s,c)=>s+getTotalCat(c,soloQ),0); }
+
+  function agregarGasto() {
+    const monto = parseFloat(form.monto);
+    if (!monto||monto<=0||!rubroActivo) return;
+    const rubro = BUDGET.categorias.flatMap(c=>c.rubros).find(r=>r.id===rubroActivo);
+    const nd = {...datos};
+    if (!nd[mes]) nd[mes]={};
+    if (!nd[mes][rubroActivo]) nd[mes][rubroActivo]=[];
+    nd[mes][rubroActivo] = [...nd[mes][rubroActivo], {monto,desc:form.desc||rubro.nombre,fecha:new Date().toISOString(),quincena}];
+    setDatos(nd);
+    const limCheck = getLimiteQ(rubro);
+    const gastNuevo = getGastado(rubroActivo, quincena) + monto;
+    if (gastNuevo > limCheck) {
+      setAlerta(`⚠️ Pasaste el límite en "${rubro.nombre}"`);
+      setTimeout(()=>setAlerta(null),4000);
+    }
+    setForm({monto:"",desc:""});
+    setVista("main");
+  }
+
+  function eliminarGasto(rubroId, idx) {
+    const nd = {...datos};
+    if (!nd[mes]?.[rubroId]) return;
+    nd[mes][rubroId] = nd[mes][rubroId].filter((_,i)=>i!==idx);
+    setDatos(nd);
+  }
+
+  const S = {
+    page:  {fontFamily:"-apple-system,'Helvetica Neue',sans-serif",background:"#f5f5f7",minHeight:"100vh",maxWidth:430,margin:"0 auto",position:"relative",paddingBottom:90},
+    hero:  {background:"linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%)",padding:"56px 20px 24px",borderRadius:"0 0 28px 28px",boxShadow:"0 8px 32px rgba(0,0,0,0.18)"},
+    body:  {padding:"16px 16px 0",display:"flex",flexDirection:"column",gap:10},
+    hdr:   {display:"flex",alignItems:"center",justifyContent:"space-between",padding:"56px 20px 12px",background:"#fff",borderBottom:"1px solid #f0f0f0"},
+    card:  {borderRadius:16,padding:"14px 16px",border:"none",cursor:"pointer",width:"100%",textAlign:"left",boxShadow:"0 2px 8px rgba(0,0,0,0.05)"},
+    txRow: {display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",background:"#fafafa",borderRadius:10,marginTop:6,border:"1px solid #f0f0f0"},
+    fab:   {position:"fixed",bottom:"calc(66px + env(safe-area-inset-bottom))",right:"50%",transform:"translateX(50%)",background:"linear-gradient(135deg,#1a1a2e,#0f3460)",color:"#fff",border:"none",borderRadius:99,padding:"13px 28px",fontSize:15,fontWeight:700,cursor:"pointer",boxShadow:"0 6px 24px rgba(15,52,96,0.4)",zIndex:100},
+    label: {fontSize:13,fontWeight:600,color:"#555",marginBottom:6,display:"block"},
+    input: {width:"100%",padding:"12px 14px",borderRadius:12,border:"1.5px solid #e0e0e0",fontSize:16,marginBottom:14,outline:"none",background:"#fafafa"},
+    rbtn:  {display:"flex",flexDirection:"column",alignItems:"flex-start",padding:"10px 14px",borderRadius:12,cursor:"pointer",width:"100%",textAlign:"left",gap:2},
+    pbtn:  {width:"100%",padding:"14px",background:"linear-gradient(135deg,#1a1a2e,#0f3460)",color:"#fff",border:"none",borderRadius:14,fontSize:16,fontWeight:700,cursor:"pointer"},
+    msel:  {background:"rgba(255,255,255,0.12)",color:"#fff",border:"1px solid rgba(255,255,255,0.25)",borderRadius:8,padding:"4px 12px 4px 8px",fontSize:12,fontWeight:600,cursor:"pointer"},
+    alrt:  {position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",background:"#1a1a2e",color:"#fff",padding:"12px 20px",borderRadius:12,fontSize:14,fontWeight:600,zIndex:999,boxShadow:"0 4px 20px rgba(0,0,0,0.25)",whiteSpace:"nowrap"},
+    delbtn:{background:"#fff0f0",color:"#e74c3c",border:"none",borderRadius:6,cursor:"pointer",padding:"2px 7px",fontSize:12,fontWeight:700},
+    backbt:{background:"none",border:"none",fontSize:22,cursor:"pointer",color:"#333",padding:"0 4px"},
+  };
+
+  const QSwitch = () => (
+    <div style={{display:"flex",gap:8,marginBottom:10}}>
+      {[1,2].map(q=>(
+        <button key={q} onClick={()=>setQuincena(q)} style={{flex:1,padding:"6px",borderRadius:8,fontWeight:700,fontSize:12,border:quincena===q?"1.5px solid rgba(255,255,255,0.6)":"1.5px solid rgba(255,255,255,0.2)",background:quincena===q?"rgba(255,255,255,0.18)":"transparent",color:"#fff",cursor:"pointer"}}>
+          {q===1?"1ra quincena":"2da quincena"}
+        </button>
+      ))}
+    </div>
+  );
+
+  const MesSelect = ({dark=false}) => (
+    <select value={mes} onChange={e=>setMes(e.target.value)} style={dark?S.msel:{...S.msel,background:"rgba(0,0,0,0.06)",color:"#1a1a2e",border:"1px solid #ddd"}}>
+      {[-2,-1,0,1].map(d=>{
+        const dt=new Date(); dt.setMonth(dt.getMonth()+d);
+        const k=`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}`;
+        return <option key={k} value={k}>{getMesLabel(k)}</option>;
+      })}
+    </select>
+  );
+
+  // ── AGREGAR ──
+  if (vista==="agregar") {
+    const allRubros = BUDGET.categorias.flatMap(c=>c.rubros.map(r=>({...r,catNombre:c.nombre,accent:c.accent})));
+    return (
+      <div style={S.page}>
+        <div style={S.hdr}>
+          <button onClick={()=>setVista("main")} style={S.backbt}>←</button>
+          <span style={{fontWeight:700,fontSize:17,color:"#1a1a2e"}}>Registrar gasto</span>
+          <span/>
+        </div>
+        <div style={S.body}>
+          <div style={{marginBottom:12}}>
+            <label style={S.label}>Quincena</label>
+            <div style={{display:"flex",gap:8}}>
+              {[1,2].map(q=>(
+                <button key={q} onClick={()=>setQuincena(q)} style={{flex:1,padding:"10px",borderRadius:12,fontWeight:700,fontSize:14,border:quincena===q?"2px solid #1a1a2e":"2px solid #eee",background:quincena===q?"#1a1a2e":"#fafafa",color:quincena===q?"#fff":"#555",cursor:"pointer"}}>
+                  {q===1?"1ra quincena":"2da quincena"}
+                </button>
+              ))}
+            </div>
+          </div>
+          <label style={S.label}>Categoría</label>
+          <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>
+            {allRubros.map(r=>(
+              <button key={r.id} onClick={()=>setRubroActivo(r.id)} style={{...S.rbtn,border:rubroActivo===r.id?`2px solid ${r.accent}`:"2px solid #eee",background:rubroActivo===r.id?r.accent+"18":"#fafafa"}}>
+                <span style={{fontWeight:600,color:"#222",fontSize:14}}>{r.nombre}</span>
+                <span style={{fontSize:12,color:"#888"}}>{r.catNombre} · límite {fmt(getLimiteQ(r))}</span>
+              </button>
+            ))}
+          </div>
+          <label style={S.label}>Monto (₡)</label>
+          <input type="number" inputMode="numeric" placeholder="Ej: 8500" value={form.monto} onChange={e=>setForm(f=>({...f,monto:e.target.value}))} style={S.input}/>
+          <label style={S.label}>Descripción (opcional)</label>
+          <input type="text" placeholder="Ej: Almuerzo Soda Yamileth" value={form.desc} onChange={e=>setForm(f=>({...f,desc:e.target.value}))} style={S.input}/>
+          <button onClick={agregarGasto} disabled={!rubroActivo||!form.monto} style={{...S.pbtn,opacity:!rubroActivo||!form.monto?0.4:1,marginTop:8}}>
+            Guardar gasto
+          </button>
+        </div>
+        <NavBar tab={tab} setTab={t=>{setTab(t);setVista("main");}}/>
+      </div>
+    );
+  }
+
+  // ── DETALLE ──
+  if (vista==="detalle"&&catActiva) {
+    const cat = BUDGET.categorias.find(c=>c.id===catActiva);
+    return (
+      <div style={S.page}>
+        <div style={S.hdr}>
+          <button onClick={()=>setVista("main")} style={S.backbt}>←</button>
+          <span style={{fontWeight:700,fontSize:17,color:"#1a1a2e"}}>{cat.emoji} {cat.nombre}</span>
+          <span/>
+        </div>
+        <div style={S.body}>
+          <div style={{display:"flex",gap:8,marginBottom:4}}>
+            {[1,2].map(q=>(
+              <button key={q} onClick={()=>setQuincena(q)} style={{flex:1,padding:"8px",borderRadius:10,fontWeight:700,fontSize:13,border:quincena===q?"2px solid #1a1a2e":"2px solid #eee",background:quincena===q?"#1a1a2e":"#fafafa",color:quincena===q?"#fff":"#555",cursor:"pointer"}}>
+                {q===1?"1ra quincena":"2da quincena"}
+              </button>
+            ))}
+          </div>
+          {cat.rubros.map(r=>{
+            const limite = getLimiteQ(r);
+            const gastado = getGastado(r.id, quincena);
+            const txAll = gastosMes[r.id]||[];
+            const txs = txAll.filter(t=>(t.quincena||1)===quincena);
+            const over = gastado>limite;
+            return (
+              <div key={r.id} style={{marginBottom:20}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{fontWeight:700,fontSize:15,color:"#222"}}>{r.nombre}</span>
+                  <span style={{fontSize:13,color:over?"#e74c3c":cat.accent,fontWeight:700}}>{fmt(gastado)} / {fmt(limite)}</span>
+                </div>
+                <BarraProgreso gastado={gastado} limite={limite} accent={cat.accent}/>
+                {over&&<p style={{fontSize:12,color:"#e74c3c",margin:"4px 0 0"}}>⚠️ Excedido por {fmt(gastado-limite)}</p>}
+                {txs.length===0&&<p style={{fontSize:12,color:"#aaa",marginTop:6}}>Sin gastos registrados</p>}
+                {txs.map((t,i)=>{
+                  const idxG=txAll.indexOf(t);
+                  return (
+                    <div key={i} style={S.txRow}>
+                      <div>
+                        <p style={{margin:0,fontSize:14,color:"#333"}}>{t.desc}</p>
+                        <p style={{margin:0,fontSize:11,color:"#aaa"}}>{new Date(t.fecha).toLocaleDateString("es-CR",{day:"2-digit",month:"short"})}</p>
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <span style={{fontWeight:700,fontSize:14,color:"#333"}}>{fmt(t.monto)}</span>
+                        <button onClick={()=>eliminarGasto(r.id,idxG)} style={S.delbtn}>✕</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
+        <NavBar tab={tab} setTab={t=>{setTab(t);setVista("main");}}/>
+      </div>
+    );
+  }
+
+  // ── REPORTE ──
+  if (tab==="reporte") {
+    const gastadoTotal = totalGastado();
+    const presupuestoTotal = 702500;
+    const pctEjec = Math.round((gastadoTotal/presupuestoTotal)*100);
+    const disponibleFinal = BUDGET.salarioNeto - gastadoTotal;
+    return (
+      <div style={S.page}>
+        {alerta&&<div style={S.alrt}>{alerta}</div>}
+        <div style={{...S.hero,background:"linear-gradient(135deg,#0f2027,#203a43,#2c5364)"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+            <span style={{fontSize:13,color:"rgba(255,255,255,0.7)",fontWeight:600}}>📊 Reporte mensual</span>
+            <MesSelect dark/>
+          </div>
+          <p style={{margin:"8px 0 2px",fontSize:13,color:"rgba(255,255,255,0.65)"}}>Disponible final</p>
+          <p style={{margin:0,fontSize:34,fontWeight:800,letterSpacing:-1,color:disponibleFinal>=0?"#6ee7b7":"#ff6b6b"}}>{fmt(disponibleFinal)}</p>
+          <p style={{margin:"2px 0 10px",fontSize:12,color:"rgba(255,255,255,0.5)"}}>Salario neto: {fmt(BUDGET.salarioNeto)}</p>
+          <div style={{display:"flex",gap:10}}>
+            {[["Gastado",fmt(gastadoTotal)],["Presupuestado",fmt(presupuestoTotal)],["Ejecutado",pctEjec+"%"]].map(([l,v],i)=>(
+              <div key={i} style={{flex:1,background:"rgba(255,255,255,0.08)",borderRadius:12,padding:"10px 10px"}}>
+                <p style={{margin:0,fontSize:10,color:"rgba(255,255,255,0.55)"}}>{l}</p>
+                <p style={{margin:0,fontSize:16,fontWeight:800,color:i===2?(pctEjec>100?"#ff6b6b":pctEjec>80?"#fbbf24":"#6ee7b7"):"#fff"}}>{v}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div style={S.body}>
+          {BUDGET.categorias.map(cat=>{
+            const gc=getTotalCat(cat), lc=getLimiteCat(cat), pct=Math.round((gc/lc)*100), over=gc>lc;
+            const estado=over?"🔴 Excedido":pct>=80?"🟡 Al límite":"🟢 OK";
+            return (
+              <div key={cat.id} style={{background:"#fff",borderRadius:16,padding:"14px 16px",boxShadow:"0 2px 8px rgba(0,0,0,0.05)",border:over?"1.5px solid #fecaca":"1px solid #f0f0f0"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <div style={{display:"flex",alignItems:"center",gap:6}}>
+                    <span style={{fontSize:18}}>{cat.emoji}</span>
+                    <span style={{fontWeight:700,fontSize:15,color:"#1a1a2e"}}>{cat.nombre}</span>
+                  </div>
+                  <span style={{fontSize:11,fontWeight:600}}>{estado}</span>
+                </div>
+                <BarraProgreso gastado={gc} limite={lc} accent={cat.accent}/>
+                <div style={{display:"flex",justifyContent:"space-between",marginTop:6}}>
+                  <span style={{fontSize:12,color:"#888"}}>Gastado: {fmt(gc)}</span>
+                  <span style={{fontSize:12,color:"#888"}}>Límite: {fmt(lc)} ({pct}%)</span>
+                </div>
+                {cat.rubros.map(r=>{
+                  const g=getGastado(r.id); if(g===0) return null;
+                  const ov=g>r.limite;
+                  return (
+                    <div key={r.id} style={{display:"flex",justifyContent:"space-between",padding:"5px 8px",marginTop:4,background:ov?"#fff5f5":"#f9f9f9",borderRadius:8,borderLeft:`3px solid ${ov?"#e74c3c":cat.accent}`}}>
+                      <span style={{fontSize:12,color:"#555"}}>{r.nombre}</span>
+                      <span style={{fontSize:12,fontWeight:700,color:ov?"#e74c3c":"#333"}}>{fmt(g)} / {fmt(r.limite)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+          <div style={{background:"#fff",borderRadius:16,padding:"14px 16px",boxShadow:"0 2px 8px rgba(0,0,0,0.05)",border:"1px dashed #f0a040"}}>
+            <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:8}}>
+              <span style={{fontSize:18}}>🧾</span>
+              <span style={{fontWeight:700,fontSize:15,color:"#1a1a2e"}}>Deuda con mamá</span>
+            </div>
+            {[["Saldo inicial","₡430.000","#c0392b"],["Pagos este mes",fmt(getGastado("mama")),"#2d8c6e"]].map(([l,v,c])=>(
+              <div key={l} style={{display:"flex",justifyContent:"space-between",marginTop:2}}>
+                <span style={{fontSize:13,color:"#888"}}>{l}</span>
+                <span style={{fontWeight:700,color:c}}>{v}</span>
+              </div>
+            ))}
+            <div style={{display:"flex",justifyContent:"space-between",marginTop:6,paddingTop:6,borderTop:"1px solid #f0f0f0"}}>
+              <span style={{fontSize:13,fontWeight:700,color:"#555"}}>Saldo estimado</span>
+              <span style={{fontWeight:800,color:"#c0392b"}}>{fmt(430000-getGastado("mama"))}</span>
+            </div>
+          </div>
+        </div>
+        <div style={{height:80}}/>
+        <NavBar tab={tab} setTab={setTab}/>
+      </div>
+    );
+  }
+
+  // ── QUINCENAL (main) ──
+  const salarioRef = Math.round(BUDGET.salarioNeto/2);
+  const gastadoRef = totalGastado(quincena);
+  const disponible = salarioRef - gastadoRef;
+  const pctTotal   = Math.min((gastadoRef/salarioRef)*100, 100);
+
+  return (
+    <div style={S.page}>
+      {alerta&&<div style={S.alrt}>{alerta}</div>}
+      <div style={S.hero}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+          <span style={{fontSize:13,color:"rgba(255,255,255,0.75)",fontWeight:500}}>Quincena {quincena} · Gabo</span>
+          <MesSelect dark/>
+        </div>
+        <QSwitch/>
+        <p style={{margin:"4px 0 2px",fontSize:13,color:"rgba(255,255,255,0.7)"}}>Disponible</p>
+        <p style={{margin:0,fontSize:36,fontWeight:800,letterSpacing:-1,color:disponible>=0?"#fff":"#ff6b6b"}}>{fmt(disponible)}</p>
+        <p style={{margin:"2px 0 12px",fontSize:12,color:"rgba(255,255,255,0.6)"}}>de {fmt(salarioRef)} esta quincena</p>
+        <div style={{height:8,borderRadius:99,background:"rgba(255,255,255,0.2)",overflow:"hidden"}}>
+          <div style={{height:"100%",width:`${pctTotal}%`,borderRadius:99,background:pctTotal>90?"#ff6b6b":"rgba(255,255,255,0.85)",transition:"width 0.5s ease"}}/>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",marginTop:5}}>
+          <span style={{fontSize:11,color:"rgba(255,255,255,0.6)"}}>Gastado: {fmt(gastadoRef)}</span>
+          <span style={{fontSize:11,color:"rgba(255,255,255,0.6)"}}>{Math.round(pctTotal)}%</span>
+        </div>
+      </div>
+      <div style={S.body}>
+        {BUDGET.categorias.map(cat=>{
+          const total=getTotalCat(cat,quincena), limite=getLimiteCat(cat,"quincenal"), over=total>limite;
+          return (
+            <button key={cat.id} onClick={()=>{setCatActiva(cat.id);setVista("detalle");}} style={{...S.card,background:cat.color}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <span style={{fontSize:20}}>{cat.emoji}</span>
+                  <div style={{textAlign:"left"}}>
+                    <p style={{margin:0,fontWeight:700,fontSize:15,color:"#222"}}>{cat.nombre}</p>
+                    <p style={{margin:0,fontSize:12,color:"#888"}}>{cat.rubros.length} rubros</p>
+                  </div>
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <p style={{margin:0,fontWeight:800,fontSize:16,color:over?"#e74c3c":cat.accent}}>{fmt(total)}</p>
+                  <p style={{margin:0,fontSize:11,color:"#aaa"}}>de {fmt(limite)}</p>
+                </div>
+              </div>
+              <BarraProgreso gastado={total} limite={limite} accent={cat.accent}/>
+              {over&&<p style={{margin:"6px 0 0",fontSize:12,color:"#e74c3c",textAlign:"left"}}>⚠️ Excedido por {fmt(total-limite)}</p>}
+            </button>
+          );
+        })}
+        <div style={{...S.card,background:"#fff8f0",border:"1px dashed #f0a040"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+            <span style={{fontSize:18}}>🧾</span>
+            <p style={{margin:0,fontWeight:700,fontSize:14,color:"#222"}}>Deuda con mamá</p>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between"}}>
+            <span style={{fontSize:13,color:"#888"}}>Saldo pendiente</span>
+            <span style={{fontWeight:700,color:"#c0392b"}}>{fmt(430000-getGastado("mama"))}</span>
+          </div>
+        </div>
+      </div>
+      <button onClick={()=>{setRubroActivo(null);setForm({monto:"",desc:""});setVista("agregar");}} style={S.fab}>
+        + Gasto
+      </button>
+      <NavBar tab={tab} setTab={setTab}/>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
