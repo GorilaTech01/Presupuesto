@@ -1,0 +1,36 @@
+# Publicly pre-announced central bank meeting schedules.
+#
+# These are fixed, official calendar dates published months/years in
+# advance -- not forecasted or fabricated data. They are stored as static
+# configuration (rather than fetched at runtime) because they rarely change
+# and because this project's sandboxed CI/dev environment may not have
+# outbound network access to central bank websites at run time.
+#
+# Sources (retrieved 2026-08-29):
+#   Federal Reserve (FOMC): https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+#   ECB Governing Council:  https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html
+#
+# Update this file whenever a central bank publishes/revises its schedule.
+
+fomc:
+  source_url: "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+  meetings:
+    - { decision_date: "2026-01-28", label: "January FOMC" }
+    - { decision_date: "2026-03-18", label: "March FOMC (with projections)" }
+    - { decision_date: "2026-04-29", label: "April FOMC" }
+    - { decision_date: "2026-06-17", label: "June FOMC (with projections)" }
+    - { decision_date: "2026-07-29", label: "July FOMC" }
+    - { decision_date: "2026-09-16", label: "September FOMC (with projections)" }
+    - { decision_date: "2026-10-28", label: "October FOMC" }
+    - { decision_date: "2026-12-09", label: "December FOMC (with projections)" }
+
+ecb:
+  source_url: "https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html"
+  meetings:
+    - { decision_date: "2026-03-19", label: "March Governing Council (with projections)" }
+    - { decision_date: "2026-04-30", label: "April Governing Council" }
+    - { decision_date: "2026-06-11", label: "June Governing Council (with projections)" }
+    - { decision_date: "2026-07-23", label: "July Governing Council" }
+    - { decision_date: "2026-09-10", label: "September Governing Council (with projections)" }
+    - { decision_date: "2026-10-29", label: "October Governing Council" }
+    - { decision_date: "2026-12-17", label: "December Governing Council (with projections)" }
