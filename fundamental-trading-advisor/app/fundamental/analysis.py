@@ -71,6 +71,7 @@ def build_currency_score(currency: str, result: FetchResult) -> FundamentalScore
                 gdp_growth=facts.get("us_gdp_growth_annualized"),
                 retail_sales=None,
             ),
+            scoring.score_market_expectations(),
         ]
     elif currency == "EUR":
         drivers = [
@@ -91,6 +92,7 @@ def build_currency_score(currency: str, result: FetchResult) -> FundamentalScore
                 gdp_growth=facts.get("ez_gdp_growth_yoy"),
                 retail_sales=facts.get("ez_retail_sales_yoy"),
             ),
+            scoring.score_market_expectations(),
         ]
     else:
         raise ValueError(f"no scoring model defined for currency '{currency}'")
@@ -141,6 +143,7 @@ def build_xau_score(result: FetchResult) -> FundamentalScore:
             positioning=facts.get("gold_net_noncommercial_positioning"),
             inventories=None,
         ),
+        scoring.score_market_expectations(),
     ]
     total = round(sum(d.contribution for d in drivers), 4)
     return FundamentalScore(
@@ -163,6 +166,7 @@ def build_btc_score(result: FetchResult) -> FundamentalScore:
     )
     drivers = [
         scoring.score_liquidity_conditions(policy_rate=facts.get("us_fed_funds_target_upper")),
+        scoring.score_market_expectations(),
     ]
     total = round(sum(d.contribution for d in drivers), 4)
     return FundamentalScore(

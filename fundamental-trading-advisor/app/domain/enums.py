@@ -33,9 +33,27 @@ class AssetClass(StrEnum):
 
 
 class Direction(StrEnum):
+    """The fundamental bias/call. NOT, by itself, a statement that a
+    position should be entered right now -- see `TradeAction`.
+    """
+
     BUY = "BUY"
     SELL = "SELL"
     NO_TRADE = "NO_TRADE"
+
+
+class TradeAction(StrEnum):
+    """Whether a `Direction` bias is currently executable.
+
+    Added after the pre-push audit (docs/decision_audit_eurusd_2026-08-31.md,
+    section 7): BUY/SELL must not be read as "enter immediately" when a
+    CRITICAL catalyst is still pending -- that case is WAIT_FOR_TRIGGER, not
+    ENTER_NOW, even though `direction` is already BUY or SELL.
+    """
+
+    ENTER_NOW = "ENTER_NOW"
+    WAIT_FOR_TRIGGER = "WAIT_FOR_TRIGGER"
+    NONE = "NONE"
 
 
 class CatalystSeverity(StrEnum):

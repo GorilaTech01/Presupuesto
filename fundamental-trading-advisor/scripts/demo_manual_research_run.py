@@ -64,10 +64,18 @@ from datetime import UTC, datetime
 
 from app.broker.symbol_resolver import BrokerSymbolResolver
 from app.catalysts.service import annotate_thesis_impact
-from app.domain.enums import AssetClass, CatalystSeverity, Direction, Freshness, ObservationKind
+from app.common.lookahead import assert_no_lookahead
+from app.domain.enums import (
+    AssetClass,
+    CatalystSeverity,
+    Direction,
+    Freshness,
+    ObservationKind,
+    TradeAction,
+)
 from app.domain.models import CatalystEvent, FactObservation, TradePlan
 from app.fundamental import analysis
-from app.fundamental.decision import FundamentalDecisionEngine
+from app.fundamental.decision import DecisionDraft, FundamentalDecisionEngine
 from app.market.price_provider import PriceQuote
 from app.risk.trade_math import build_trade_math
 from app.sources.repository import FetchResult
@@ -277,7 +285,28 @@ btc_facts = {
 }
 
 
+# The instant this "run" is dated as of -- every fact used below must have
+# been published at or before this timestamp (audit section 8: lookahead
+# bias). This is enforced, not just asserted in prose -- see the
+# `assert_no_lookahead` call in `main()`.
+DECISION_TIME = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+
+
+def _print_decomposed_scores(label: str, drivers: list, total: float) -> None:
+    print(f"\n{label} -- full driver decomposition (total={total:+.4f}):")
+    for d in drivers:
+        print(f"    [{d.category.value:22s}] {d.contribution:+.4f}  {d.label}")
+        print(f"        -> {d.rationale}")
+
+
 def main() -> None:
+    all_facts = list(us_facts.values()) + list(ez_facts.values())
+    assert_no_lookahead(all_facts, DECISION_TIME)
+    print(
+        f"Lookahead check: {len(all_facts)} facts, all with "
+        f"AVAILABLE_AT_DECISION_TIME=True (publication_timestamp <= {DECISION_TIME.isoformat()})"
+    )
+
     eur_result = FetchResult(facts=ez_facts, errors={})
     usd_result = FetchResult(
         facts=us_facts,
@@ -343,6 +372,17 @@ def main() -> None:
     print("(real published figures, fed through the same scoring/decision")
     print(" pipeline `weekly` uses -- see script docstring for sources)")
     print("=" * 70)
+
+    print("\n--- EURUSD (base=EUR, quote=USD) ---")
+    _print_decomposed_scores("EUR", eur_score.drivers, eur_score.total)
+    _print_decomposed_scores("USD", usd_score.drivers, usd_score.total)
+    print(f"\nEURUSD bias (EUR - USD) = {bias:+.4f}")
+    _print_decomposed_scores("XAUUSD", xau_score.drivers, xau_score.total)
+    _print_decomposed_scores("BTCUSD", btc_score.drivers, btc_score.total)
+
+    print("\n" + "-" * 70)
+    print("DECISIONS")
+    print("-" * 70)
     for label, draft, score in (
         (
             "EURUSD",
@@ -352,10 +392,33 @@ def main() -> None:
         ("XAUUSD", xau_draft, f"score={xau_score.total:+.3f}"),
         ("BTCUSD", btc_draft, f"score={btc_score.total:+.3f}"),
     ):
-        print(f"\n{label}: {draft.direction.value} (conviction {draft.conviction}/100) [{score}]")
+        print(
+            f"\n{label}: {draft.direction.value} / trade_action={draft.trade_action.value} "
+            f"(conviction {draft.conviction}/100) [{score}]"
+        )
         print(f"  {draft.thesis}")
+        if draft.conviction_breakdown is not None:
+            b = draft.conviction_breakdown
+            print(
+                f"  conviction breakdown: raw_score={b.raw_score} "
+                f"normalized_score={b.normalized_score} "
+                f"data_completeness=({b.data_completeness}) "
+                f"source_quality=({b.source_quality}) "
+                f"contradiction_penalty=-{b.contradiction_penalty} "
+                f"event_risk_penalty=-{b.event_risk_penalty} "
+                f"missing_data_penalty=-{b.missing_data_penalty} "
+                f"source_quality_penalty=-{b.source_quality_penalty} "
+                f"expectations_penalty=-{b.expectations_penalty} "
+                f"=> final_conviction={b.final_conviction}"
+            )
+        else:
+            print("  conviction breakdown: N/A (NO_TRADE, conviction is trivially 0)")
 
-    drafts = {"EURUSD": eurusd_draft, "XAUUSD": xau_draft, "BTCUSD": btc_draft}
+    drafts: dict[str, DecisionDraft] = {
+        "EURUSD": eurusd_draft,
+        "XAUUSD": xau_draft,
+        "BTCUSD": btc_draft,
+    }
     tradeable = {k: v for k, v in drafts.items() if v.direction is not Direction.NO_TRADE}
     if not tradeable:
         print("\n>>> FINAL: NO_TRADE -- no candidate cleared the minimum fundamental asymmetry.")
@@ -363,14 +426,23 @@ def main() -> None:
 
     winner_symbol = max(tradeable, key=lambda k: tradeable[k].conviction)
     winner_draft = tradeable[winner_symbol]
-    print(f"\n>>> FINAL SELECTION: {winner_symbol} {winner_draft.direction.value}")
+    print(
+        f"\n>>> FINAL SELECTION: {winner_symbol} {winner_draft.direction.value} "
+        f"[trade_action={winner_draft.trade_action.value}]"
+    )
+    if winner_draft.trade_action is TradeAction.WAIT_FOR_TRIGGER:
+        print(
+            "    NOTE: this is a fundamental BIAS only -- do not enter now. "
+            f"Trigger: {winner_draft.entry_condition}"
+        )
 
     if winner_symbol == "EURUSD":
         resolver = BrokerSymbolResolver()
         resolved = resolver.resolve("EURUSD")
-        quote = PriceQuote(
-            symbol="EURUSD", bid=1.1582, ask=1.1584, as_of=datetime(2026, 8, 28, tzinfo=UTC)
-        )
+        # NOTE: this quote is an approximate 2026-08-28 reference for demo
+        # math only (see module docstring); it is NOT a live MT5 quote and
+        # must never be used for real execution.
+        quote = PriceQuote(symbol="EURUSD", bid=1.1582, ask=1.1584, as_of=DECISION_TIME)
         math_result = build_trade_math(
             direction=winner_draft.direction,
             asset_class=AssetClass.FX,
@@ -382,13 +454,19 @@ def main() -> None:
             has_critical_catalyst_in_horizon=True,
         )
         if math_result.feasible:
+            order_type = (
+                "CONDITIONAL / PENDING -- do NOT enter until the trigger confirms; "
+                "this is a planning reference, not an executable order."
+                if winner_draft.trade_action is TradeAction.WAIT_FOR_TRIGGER
+                else "Market or limit at estimated entry (manual, in MT5)"
+            )
             plan = TradePlan(
                 asset="EURUSD",
                 symbol=resolved.broker_symbol,
                 direction=winner_draft.direction,
                 conviction_1_10=max(1, round(winner_draft.conviction / 10)),
                 horizon="3-5 trading days (through Fri 2026-09-04 NFP)",
-                order_type="Market or limit at estimated entry (manual, in MT5)",
+                order_type=order_type,
                 fundamental_trigger=winner_draft.entry_condition,
                 estimated_entry=math_result.entry,
                 stop_loss=math_result.stop_loss,

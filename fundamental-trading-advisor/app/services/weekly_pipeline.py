@@ -20,7 +20,7 @@ from app.catalysts.service import CatalystService, annotate_thesis_impact
 from app.common.errors import DataSourceUnavailable, SymbolNotVerifiable
 from app.common.time_utils import format_local
 from app.config.settings import Settings
-from app.domain.enums import AssetClass, Direction, Freshness
+from app.domain.enums import AssetClass, Direction, Freshness, TradeAction
 from app.domain.models import (
     CandidateAssessment,
     FundamentalDecision,
@@ -256,13 +256,19 @@ class WeeklyPipeline:
                 direction = Direction.NO_TRADE
                 reasons.append(f"trade math infeasible: {math_result.reason}")
             else:
+                order_type = (
+                    "CONDITIONAL / PENDING -- do NOT enter until the trigger below confirms; "
+                    "this is a planning reference, not an executable order."
+                    if draft.trade_action is TradeAction.WAIT_FOR_TRIGGER
+                    else "Market or limit at estimated entry (manual, in MT5)"
+                )
                 trade_plan = TradePlan(
                     asset=definition.asset,
                     symbol=resolved.broker_symbol,
                     direction=draft.direction,
                     conviction_1_10=max(1, round(draft.conviction / 10)),
                     horizon="3-5 trading days (approx. Mon-Fri of the analysis week)",
-                    order_type="Market or limit at estimated entry (manual, in MT5)",
+                    order_type=order_type,
                     fundamental_trigger=draft.entry_condition,
                     estimated_entry=math_result.entry,
                     stop_loss=math_result.stop_loss,
@@ -286,10 +292,14 @@ class WeeklyPipeline:
         if direction is Direction.NO_TRADE and trade_plan is not None:
             trade_plan = None  # safety net for the FundamentalDecision validator
 
+        final_trade_action = (
+            draft.trade_action if direction is not Direction.NO_TRADE else TradeAction.NONE
+        )
         return FundamentalDecision(
             symbol=definition.asset,
             asset_class=definition.asset_class,
             direction=direction,
+            trade_action=final_trade_action,
             conviction=draft.conviction if direction is not Direction.NO_TRADE else 0,
             horizon="3-5 trading days" if direction is not Direction.NO_TRADE else "N/A",
             thesis=draft.thesis
@@ -308,6 +318,9 @@ class WeeklyPipeline:
             data_cutoff_utc=data_cutoff_utc,
             data_cutoff_local=data_cutoff_local,
             trade_plan=trade_plan,
+            conviction_breakdown=draft.conviction_breakdown
+            if direction is not Direction.NO_TRADE
+            else None,
             reasons=reasons,
         )
 
@@ -325,6 +338,7 @@ class WeeklyPipeline:
             symbol="NONE",
             asset_class=AssetClass.FX,
             direction=Direction.NO_TRADE,
+            trade_action=TradeAction.NONE,
             conviction=0,
             horizon="N/A",
             thesis=(

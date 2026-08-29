@@ -14,6 +14,33 @@ attractive for holding this currency / asset over the horizon", i.e. more
 hawkish central bank, stronger labor market, stronger growth. For
 inflation, the convention is documented per-function since inflation is not
 monotonically bullish or bearish for a currency.
+
+MAGNITUDE CONVENTION (audited 2026-08-29, see docs/decision_audit_eurusd_2026-08-31.md):
+Every driver in this module is deliberately clamped to roughly the same
+order of magnitude (+/-0.2 to +/-0.5 per sub-component) so that no single
+category can mechanically dominate a FundamentalScore just because its raw
+unit happens to be a bigger number than another category's. `score_labor`,
+`score_growth`, `score_liquidity_conditions`, `score_real_yield_and_dollar`
+and `score_supply_demand` all measure a *change* or a *deviation from a
+reference point*, scaled down and clamped. `score_monetary_policy` was
+originally the one exception -- it added the raw policy-rate level (e.g.
+3.75) directly to the score, which is 10-20x larger than every other
+driver's contribution and therefore silently reduced the whole model to
+"whoever has the higher nominal rate wins", no matter what inflation,
+labor, or growth said. That bug is fixed below: monetary policy is now
+scored the same way as every other driver, as a bounded deviation from a
+neutral reference.
+
+A second, unrelated bug was found while writing that audit: `score_labor`
+and `score_real_yield_and_dollar` guarded their `revised_previous`-based
+branches with a bare truthiness check (`and payrolls_level.revised_previous`)
+instead of `is not None`. Since 0.0 is falsy in Python, a legitimate
+previous value of exactly zero silently skipped the whole branch instead of
+being used -- e.g. an NFP "MoM change" fact modeled with a zero baseline
+had its entire contribution dropped without any warning. Fixed by checking
+`is not None` explicitly everywhere a revised_previous is consumed (the
+dollar-index branch additionally guards against a zero denominator, since
+that value is also used to compute a percent change).
 """
 
 from __future__ import annotations
@@ -22,6 +49,20 @@ from app.domain.enums import DriverCategory
 from app.domain.models import DriverScore, FactObservation
 
 MISSING_DATA_NOTE = "insufficient/unavailable data for this category"
+
+# Approximate, cross-economy neutral-rate references used only to turn an
+# absolute rate level into a bounded "how far from neutral" signal -- NOT a
+# claim that the Fed's and ECB's true r* are identical. Documented as a
+# simplification: a more accurate model would use each central bank's own
+# published/estimated neutral rate. Because both currencies in a pair are
+# scored against the *same* constant, using one shared reference does not
+# by itself bias the pair toward either currency; it only affects how much
+# of the true differential gets clipped by the +/-0.5 bound below.
+NEUTRAL_NOMINAL_RATE_REFERENCE = 2.5
+NEUTRAL_REAL_RATE_REFERENCE = 0.5
+POLICY_STANCE_SCALE = 0.15
+REAL_RATE_SCALE = 0.3
+_DRIVER_CLAMP = 0.5
 
 
 def _missing(category: DriverCategory, label: str, detail: str) -> DriverScore:
@@ -39,36 +80,84 @@ def score_monetary_policy(
     policy_rate: FactObservation | None,
     headline_inflation: FactObservation | None,
 ) -> DriverScore:
-    """Higher policy rate = more attractive carry (positive).
-    Higher *real* policy rate (rate - inflation) = tighter/more hawkish
-    stance = additional positive contribution, since a central bank holding
-    real rates restrictive signals it is prioritizing currency-supportive
-    tightness over growth.
+    """Policy stance relative to a neutral reference, on the same bounded
+    scale as every other driver in this module (see MAGNITUDE CONVENTION in
+    the module docstring). Two bounded sub-components, each clamped to
+    +/-0.5:
+
+    1. `policy_stance`: how far the *nominal* policy rate sits above/below
+       an approximate neutral nominal rate -- a rate meaningfully above
+       neutral is a hawkish/currency-supportive stance.
+    2. `real_rate_stance`: how far the *real* policy rate (nominal rate -
+       headline inflation) sits above/below an approximate neutral real
+       rate (r*) -- a restrictive real rate is currency-supportive.
+
+    This intentionally does NOT use the raw rate level as the score (that
+    was the pre-audit bug): a 3.75% rate and a 2.25% rate are each turned
+    into a small, bounded deviation from a shared reference, not a 1.5-point
+    swing that would dwarf every other category.
     """
     if policy_rate is None:
         return _missing(DriverCategory.MONETARY_POLICY, "Policy rate", "no policy rate observation")
-    nominal_component = policy_rate.value or 0.0
     facts = [f"{policy_rate.source}:{policy_rate.indicator}={policy_rate.value}{policy_rate.unit}"]
-    real_component = 0.0
-    rationale = f"Policy rate {policy_rate.value:.2f}% contributes {nominal_component:.2f} (carry)."
+    stance_raw = (policy_rate.value or 0.0) - NEUTRAL_NOMINAL_RATE_REFERENCE
+    policy_stance = max(-_DRIVER_CLAMP, min(_DRIVER_CLAMP, stance_raw * POLICY_STANCE_SCALE))
+    rationale = (
+        f"Policy rate {policy_rate.value:.2f}% vs. ~{NEUTRAL_NOMINAL_RATE_REFERENCE:.1f}% "
+        f"neutral reference (deviation {stance_raw:+.2f}pp) -> {policy_stance:+.2f} "
+        "(nominal stance)."
+    )
+    real_rate_stance = 0.0
     if headline_inflation is not None and headline_inflation.value is not None:
         real_rate = (policy_rate.value or 0.0) - headline_inflation.value
-        real_component = real_rate * 0.5
+        real_dev = real_rate - NEUTRAL_REAL_RATE_REFERENCE
+        real_rate_stance = max(-_DRIVER_CLAMP, min(_DRIVER_CLAMP, real_dev * REAL_RATE_SCALE))
         facts.append(
-            f"{headline_inflation.source}:{headline_inflation.indicator}={headline_inflation.value}{headline_inflation.unit}"
+            f"{headline_inflation.source}:{headline_inflation.indicator}="
+            f"{headline_inflation.value}{headline_inflation.unit}"
         )
         rationale += (
-            f" Real policy rate ~{real_rate:.2f}pp (rate - headline inflation) "
-            f"contributes {real_component:.2f} (restrictiveness)."
+            f" Real policy rate ~{real_rate:+.2f}pp vs. ~{NEUTRAL_REAL_RATE_REFERENCE:.1f}% "
+            f"neutral real-rate reference (deviation {real_dev:+.2f}pp) -> "
+            f"{real_rate_stance:+.2f} (real-rate stance)."
         )
     else:
         rationale += " Real-rate component skipped: no headline inflation observation."
     return DriverScore(
         category=DriverCategory.MONETARY_POLICY,
-        label="Policy rate & real-rate stance",
-        contribution=round(nominal_component + real_component, 4),
+        label="Policy rate & real-rate stance (vs. neutral reference)",
+        contribution=round(policy_stance + real_rate_stance, 4),
         rationale=rationale,
         supporting_facts=facts,
+    )
+
+
+def score_market_expectations(*, expectations_available: bool = False) -> DriverScore:
+    """Placeholder for the forward-looking policy-path driver (section 3 of
+    the audit): whether markets are pricing further hikes/cuts, and how far
+    current data has already been "priced in". No free, reliable OIS/
+    Fed-Funds-futures/FedWatch-equivalent feed is wired in this version (see
+    README limitations), so this always returns a zero-contribution,
+    explicitly labeled EXPECTATIONS_DATA_INCOMPLETE driver rather than
+    inferring a forward path from the current rate alone. The decision
+    engine applies a separate, fixed conviction penalty for this same gap
+    (see `FundamentalDecisionEngine`), so the gap is never silently hidden
+    inside an aggregate score.
+    """
+    if expectations_available:  # pragma: no cover -- no implementation wired yet
+        raise NotImplementedError("no expectations data source is wired in this version")
+    return DriverScore(
+        category=DriverCategory.MARKET_EXPECTATIONS,
+        label="Forward policy-path expectations",
+        contribution=0.0,
+        rationale=(
+            "EXPECTATIONS_DATA_INCOMPLETE: no OIS/Fed-funds-futures/FedWatch-equivalent "
+            "forward-path data source is implemented in this version. This driver reflects "
+            "CURRENT policy only; it cannot say how much of it is already priced in or "
+            "whether a hike/cut is expected at the next meeting. Conviction is reduced "
+            "accordingly (see conviction breakdown)."
+        ),
+        supporting_facts=[],
     )
 
 
@@ -137,7 +226,7 @@ def score_labor(
     if (
         payrolls_level is not None
         and payrolls_level.value is not None
-        and payrolls_level.revised_previous
+        and payrolls_level.revised_previous is not None
     ):
         delta_k = payrolls_level.value - payrolls_level.revised_previous
         c = max(-0.3, min(0.3, delta_k / 300.0))
@@ -148,7 +237,7 @@ def score_labor(
     if (
         job_openings is not None
         and job_openings.value is not None
-        and job_openings.revised_previous
+        and job_openings.revised_previous is not None
     ):
         delta = job_openings.value - job_openings.revised_previous
         c = max(-0.2, min(0.2, delta / 500.0))
@@ -266,7 +355,8 @@ def score_real_yield_and_dollar(
     if (
         dollar_index is not None
         and dollar_index.value is not None
-        and dollar_index.revised_previous
+        and dollar_index.revised_previous is not None
+        and dollar_index.revised_previous != 0
     ):
         pct_change = (
             (dollar_index.value - dollar_index.revised_previous)

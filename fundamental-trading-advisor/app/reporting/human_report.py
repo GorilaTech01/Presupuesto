@@ -45,9 +45,27 @@ def render_human_report(comparison: WeeklyComparison, timezone_name: str) -> str
 
     lines.append(f"SELECTED ASSET:\n{comparison.selected_symbol}")
     lines.append("")
-    lines.append(f"DECISION:\n{d.direction.value}")
+    lines.append(f"DECISION (fundamental bias):\n{d.direction.value}")
+    lines.append("")
+    lines.append(f"TRADE ACTION:\n{d.trade_action.value}")
+    if d.trade_action.value == "WAIT_FOR_TRIGGER":
+        lines.append(
+            "  (bias only -- NOT an executable order yet; wait for the entry condition below)"
+        )
     lines.append("")
     lines.append(f"CONVICTION:\n{d.conviction_1_10}/10")
+    if d.conviction_breakdown is not None:
+        b = d.conviction_breakdown
+        lines.append(
+            f"  raw_score={b.raw_score} normalized_score={b.normalized_score} "
+            f"data_completeness=({b.data_completeness}) source_quality=({b.source_quality}) "
+            f"contradiction_penalty=-{b.contradiction_penalty} "
+            f"event_risk_penalty=-{b.event_risk_penalty} "
+            f"missing_data_penalty=-{b.missing_data_penalty} "
+            f"source_quality_penalty=-{b.source_quality_penalty} "
+            f"expectations_penalty=-{b.expectations_penalty} "
+            f"-> final_conviction={b.final_conviction}/100"
+        )
     lines.append("")
     lines.append(f"HORIZON:\n{d.horizon}")
     lines.append("")

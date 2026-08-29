@@ -22,9 +22,14 @@ def to_machine_readable(comparison: WeeklyComparison) -> dict[str, Any]:
         "selected_symbol": comparison.selected_symbol,
         "incomplete_reason": comparison.incomplete_reason,
         "decision": d.direction.value,
+        "fundamental_bias": d.direction.value,
+        "trade_action": d.trade_action.value,
         "symbol": d.symbol,
         "conviction": d.conviction,
         "conviction_1_10": d.conviction_1_10,
+        "conviction_breakdown": (
+            d.conviction_breakdown.model_dump() if d.conviction_breakdown else None
+        ),
         "fundamental_trigger": d.entry_condition,
         "entry": tp.estimated_entry if tp else None,
         "stop_loss": tp.stop_loss if tp else None,

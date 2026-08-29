@@ -20,6 +20,7 @@ from app.domain.enums import (
     DriverCategory,
     Freshness,
     ObservationKind,
+    TradeAction,
 )
 
 
@@ -141,16 +142,43 @@ class TradePlan(BaseModel):
     main_risks: list[str]
 
 
+class ConvictionBreakdown(BaseModel):
+    """Fully auditable decomposition of how `conviction` was computed.
+
+    Added after the pre-push audit (docs/decision_audit_eurusd_2026-08-31.md,
+    section 4) so conviction is never a single opaque number: every point
+    added or subtracted is named here. `None` on a NO_TRADE decision
+    (conviction is trivially 0; there is nothing to decompose).
+    """
+
+    raw_score: float
+    normalized_score: float
+    data_completeness: str
+    source_quality: str
+    contradiction_penalty: int
+    event_risk_penalty: int
+    missing_data_penalty: int
+    source_quality_penalty: int
+    expectations_penalty: int
+    final_conviction: int
+
+
 class FundamentalDecision(BaseModel):
     """The single structured decision produced for a given run.
 
     `conviction` is 0-100 internally; `conviction_1_10` is the user-facing
     rounding of it. Both must agree.
+
+    `direction` is the fundamental bias (BUY/SELL/NO_TRADE). `trade_action`
+    says whether that bias is immediately executable (`ENTER_NOW`) or
+    pending a catalyst (`WAIT_FOR_TRIGGER`) -- added after the pre-push
+    audit so BUY/SELL is never misread as "enter now" (section 7).
     """
 
     symbol: str
     asset_class: AssetClass
     direction: Direction
+    trade_action: TradeAction
     conviction: int = Field(ge=0, le=100)
     horizon: str
     thesis: str
@@ -165,6 +193,7 @@ class FundamentalDecision(BaseModel):
     data_cutoff_utc: datetime
     data_cutoff_local: str
     trade_plan: TradePlan | None = None
+    conviction_breakdown: ConvictionBreakdown | None = None
     reasons: list[str] = Field(default_factory=list)
 
     @property

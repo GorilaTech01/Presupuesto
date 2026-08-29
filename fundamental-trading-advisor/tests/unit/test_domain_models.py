@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from app.domain.enums import AssetClass, CatalystSeverity, Direction, DriverCategory
+from app.domain.enums import AssetClass, CatalystSeverity, Direction, DriverCategory, TradeAction
 from app.domain.models import (
     CatalystEvent,
     DriverScore,
@@ -73,6 +73,7 @@ def test_no_trade_decision_cannot_carry_a_trade_plan():
             symbol="EURUSD",
             asset_class=AssetClass.FX,
             direction=Direction.NO_TRADE,
+            trade_action=TradeAction.NONE,
             conviction=0,
             horizon="N/A",
             thesis="no trade",
@@ -96,6 +97,7 @@ def test_buy_decision_requires_a_trade_plan():
             symbol="EURUSD",
             asset_class=AssetClass.FX,
             direction=Direction.BUY,
+            trade_action=TradeAction.ENTER_NOW,
             conviction=80,
             horizon="1w",
             thesis="buy thesis",
@@ -118,6 +120,7 @@ def test_conviction_1_10_rounds_and_floors_at_one_when_positive():
         symbol="EURUSD",
         asset_class=AssetClass.FX,
         direction=Direction.NO_TRADE,
+        trade_action=TradeAction.NONE,
         conviction=4,
         horizon="N/A",
         thesis="t",
@@ -141,6 +144,7 @@ def test_weekly_comparison_requires_exactly_three_candidates():
         symbol="NONE",
         asset_class=AssetClass.FX,
         direction=Direction.NO_TRADE,
+        trade_action=TradeAction.NONE,
         conviction=0,
         horizon="N/A",
         thesis="t",
