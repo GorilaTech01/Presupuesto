@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     mt5_enabled: bool = Field(default=False)
     auto_execution: bool = Field(default=False)
 
+    # Price provider (V1.1.1: automatic execution-price input, read-only)
+    price_provider: str = Field(default="auto")
+    max_quote_age_seconds: int = Field(default=60)
+
     # Paper trading / journal
     paper_trading: bool = Field(default=True)
 
@@ -64,6 +68,21 @@ class Settings(BaseSettings):
                 "AUTO_EXECUTION=true is not supported in this version. "
                 "This project is READ / ANALYZE / RECOMMEND / LOG only."
             )
+        return v
+
+    @field_validator("price_provider")
+    @classmethod
+    def _price_provider_must_be_known(cls, v: str) -> str:
+        allowed = {"auto", "mt5", "manual"}
+        if v not in allowed:
+            raise ValueError(f"PRICE_PROVIDER must be one of {sorted(allowed)}, got '{v}'")
+        return v
+
+    @field_validator("max_quote_age_seconds")
+    @classmethod
+    def _max_quote_age_seconds_must_be_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("MAX_QUOTE_AGE_SECONDS must be positive")
         return v
 
     @field_validator("risk_percent")

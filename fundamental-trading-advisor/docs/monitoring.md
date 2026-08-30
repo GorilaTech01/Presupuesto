@@ -1,5 +1,8 @@
 # V1.1 -- Fundamental Monitoring & Trade Alerts
 
+(Includes V1.1.1, section 2a: automatic, read-only execution-price
+acquisition -- see below for what changed and what didn't.)
+
 `weekly` produces one recommendation and stops. This layer adds the ability
 to keep that recommendation under fundamental observation and re-evaluate
 it as new data actually publishes, instead of treating Monday's read as
@@ -73,6 +76,107 @@ hold (`app.monitor.opportunity_engine.evaluate_opportunity`):
 If any gate fails, the opportunity stays at `WAIT` (or, if the underlying
 score has also fallen below half the trade threshold, drops to `NO_TRADE`
 and is no longer monitored -- see section 4).
+
+`fundamental_setup_ready` (V1.1.1) is `True` once gates 1-4 and 8 have all
+cleared -- i.e. the fundamental thesis itself is done -- independent of
+whether gates 5-7 (symbol/price/risk-plan, all purely operational) have.
+When `fundamental_setup_ready` is `True` but `trade_action` is still
+`WAIT`, `readiness_blocker` names exactly which operational gate is still
+open: `SYMBOL_UNVERIFIED`, `PRICE_UNAVAILABLE`, `PRICE_STALE`,
+`EXECUTION_BLOCKED_SPREAD`, or `RISK_PLAN_INFEASIBLE`. This never happens
+for a WAIT caused by fundamentals/catalysts still pending -- there,
+`fundamental_setup_ready` stays `False` and `readiness_blocker` is `None`,
+so a human glancing at a WAIT opportunity can immediately tell "still
+waiting on data" from "fundamentals are done, only price/symbol is
+missing" without reading the free-text reason.
+
+## 2a. Automatic execution-price input (V1.1.1)
+
+Once fundamentals and catalysts confirm, the system still needs a current
+bid/ask to compute entry/SL/TP/R:R/position sizing (never to decide
+direction -- see the guarantee below). `app.market.price_provider` defines
+one typed result, `CurrentMarketQuote` (bid, ask, mid, spread, timestamp,
+source, freshness, and -- when available -- tick_size/tick_value/
+contract_size/volume_min/max/step/stops_level), returned identically by
+every provider:
+
+- **`MT5ReadOnlyPriceProvider`** (`app/market/mt5_provider.py`): reads
+  `symbol_info`/`symbol_info_tick` from a MetaTrader 5 terminal already
+  running and logged in on this machine. Strictly read-only -- it calls
+  exactly `initialize`, `symbol_info`, `symbol_info_tick`, `shutdown`, and
+  nothing else. It never logs in with stored credentials and never
+  connects a real account automatically; it only attaches to whatever
+  terminal (if any) is already open. If the `MetaTrader5` package isn't
+  installed (it's Windows-only and not a project dependency) or no
+  terminal is running, it fails closed to `DataSourceUnavailable` --
+  exactly like every other source adapter in this project.
+- **`ManualPriceFileProvider`**: the original `data/manual_prices.json`
+  mechanism (section prior to V1.1.1), unchanged and never removed --
+  always available as an explicit fallback.
+
+`PRICE_PROVIDER` (`.env`) selects the priority, but the MT5 candidate is
+only ever attached when `MT5_ENABLED=true` -- with the default settings
+(`MT5_ENABLED=false`), `PRICE_PROVIDER=auto` behaves exactly like `manual`
+and no live-terminal connection is ever attempted:
+
+| Value | Behavior |
+|---|---|
+| `auto` (default) | With `MT5_ENABLED=true`: try a live read-only MT5 terminal first, fall back to the manual file. With the default `MT5_ENABLED=false`: manual file only. |
+| `mt5` | MT5 only -- no manual fallback; raises `PRICE_UNAVAILABLE` immediately if `MT5_ENABLED=false`. |
+| `manual` | Manual file only -- MT5 is never attempted regardless of `MT5_ENABLED`. |
+
+`app.market.price_router.build_price_provider(settings)` is the one place
+this is wired up; `weekly` and `monitor` both call it, so both always agree
+on provider priority.
+
+**Freshness.** `MAX_QUOTE_AGE_SECONDS` (default 60) bounds how old a quote
+may be. A quote older than that is never used to build an executable plan:
+`AutoPriceProvider.get_quote` raises `StaleDataError` (surfaced as
+`PRICE_STALE`) if the best available quote is too old, or
+`DataSourceUnavailable` (`PRICE_UNAVAILABLE`) if no configured source
+returned anything at all -- these are deliberately distinct failure modes
+so a monitored opportunity's `readiness_blocker` can say which one applies.
+
+**Inspecting a quote directly:**
+
+```bash
+uv run python -m app quote EURUSD
+```
+
+```
+Symbol: EURUSD
+Broker symbol: EURUSD
+Bid: 1.1000
+Ask: 1.1002
+Spread: 0.0002
+Timestamp: 2026-09-01T12:00:00Z
+Source: MT5_READ_ONLY
+Fresh: YES
+```
+
+**The no-directional-price-signal guarantee.** Bid, ask, spread, and
+mid-price can only ever affect: `estimated_entry`/`stop_loss`/
+`take_profit`, `risk_reward`, `position_size_lots`, and whether execution
+is blocked on spread/symbol/risk-plan grounds (`readiness_blocker`).
+Nothing in `app.market`, `app.risk.trade_math`, or the price-provider
+layer feeds into `fundamental_bias`, `direction`, `conviction`, or trigger
+confirmation -- those come exclusively from
+`app.fundamental.candidate.build_decision_draft` and
+`app.monitor.trigger_evaluator.FundamentalTriggerEvaluator`, neither of
+which takes a price as an input at all. `tests/unit/test_opportunity_engine.py`
+(`test_changing_price_or_spread_never_flips_fundamental_bias`) and
+`tests/integration/test_monitor_service.py`
+(`test_changing_bid_ask_across_refreshes_never_changes_fundamental_bias`)
+assert this directly: varying entry/stop/spread across otherwise-identical
+re-evaluations never changes `fundamental_bias`, `direction`, or
+`conviction` -- only the trade plan's own numbers and, potentially,
+`trade_action`/`readiness_blocker`.
+
+**Broker symbol verification.** Price acquisition reuses
+`BrokerSymbolResolver` (unchanged) -- it never assumes an internal asset
+name like `EURUSD` matches the broker's exact symbol. If it can't be
+resolved, `readiness_blocker=SYMBOL_UNVERIFIED` and the opportunity stays
+at `WAIT`, regardless of how confirmed the fundamentals are.
 
 ## 3. Fundamental triggers only
 
@@ -151,6 +255,28 @@ us_nonfarm_payrolls (US)
 
 Status:
 Waiting for catalyst.
+```
+
+### Example output -- fundamentals confirmed, price missing (V1.1.1)
+
+```
+FUNDAMENTAL TRADE MONITOR
+
+EURUSD
+Bias: BEARISH
+Action: WAIT
+Conviction: 7/10
+
+No material change.
+
+Next catalyst:
+None flagged.
+
+Status:
+Waiting for catalyst.
+
+Fundamental setup: READY.
+Blocked only on: PRICE_UNAVAILABLE.
 ```
 
 ### Example output -- READY_TO_TRADE
@@ -247,6 +373,8 @@ Do not enter this trade.
   "trigger_reasons": ["us_nonfarm_payrolls: confirms thesis (US_HAWKISH)"],
   "readiness_reason": "score crosses threshold; conviction floor met; ...",
   "cancellation_reason": null,
+  "fundamental_setup_ready": true,
+  "readiness_blocker": null,
   "invalidation": "Thesis invalidated if ...",
   "entry": 1.1001,
   "stop_loss": 1.1050,
@@ -323,7 +451,9 @@ of these on its own.
 - Not a GUI or dashboard.
 - Not an auto-trading system. There is no code path that places, modifies,
   or closes a real order in this version, same as `weekly` (`AUTO_EXECUTION`
-  is hardcoded `false`).
+  is hardcoded `false`). The MT5 price provider (section 2a) is strictly
+  read-only -- it never calls `order_send`/`order_check`/`positions_get` or
+  any equivalent, verified by `tests/unit/test_no_order_execution_path.py`.
 - Not a second decision engine. Every re-evaluation calls the exact same
   `FundamentalDecisionEngine` and scoring pipeline `weekly` uses.
 - Not dependent on the optional Claude synthesis layer. Everything in this
@@ -342,9 +472,19 @@ of these on its own.
   each hitting live official sources (or their cache) -- there is no
   batching or rate-limit-aware backoff beyond what each source adapter
   already does for `weekly`.
-- Manual price file (`data/manual_prices.json`) is the only price source
-  supported here too; if it's missing or stale, `READY_TO_TRADE` cannot be
-  reached (the opportunity correctly stays at `WAIT` -- see gate 6 in
-  section 2) rather than falling back to a guessed price.
+- Price acquisition is now automatic (`PRICE_PROVIDER=auto` by default,
+  section 2a), but the MT5 provider only works on a machine with a real,
+  already-logged-in MT5 terminal and the (Windows-only) `MetaTrader5`
+  package installed -- on any other machine it fails closed and the manual
+  file remains the effective source. If neither produces a fresh quote,
+  `READY_TO_TRADE` cannot be reached (the opportunity correctly stays at
+  `WAIT` with `readiness_blocker=PRICE_UNAVAILABLE`/`PRICE_STALE` -- gates
+  5-7 in section 2) rather than falling back to a guessed price.
+- The optional live-terminal broker specs (`tick_size`/`tick_value`/
+  `contract_size`/`volume_*`/`stops_level` on `CurrentMarketQuote`) are
+  captured for inspection (`python -m app quote`) but position-sizing math
+  still uses the fixture-based `SymbolSpec` from `app.broker.mt5_specs` via
+  `BrokerSymbolResolver`, not these live values -- a future version could
+  prefer the live spec when available.
 - No UI/aggregated view across many monitored opportunities beyond what
   `python -m app monitor --all --json-out` produces in one file.

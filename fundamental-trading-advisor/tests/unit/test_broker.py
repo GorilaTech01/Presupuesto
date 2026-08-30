@@ -59,3 +59,24 @@ def test_settings_reject_auto_execution_true():
 def test_settings_reject_risk_percent_above_ceiling():
     with pytest.raises(ValidationError):
         Settings(_env_file=None, risk_percent=0.05)
+
+
+def test_settings_default_price_provider_is_auto():
+    settings = Settings(_env_file=None)
+    assert settings.price_provider == "auto"
+    assert settings.max_quote_age_seconds == 60
+
+
+def test_settings_accept_valid_price_provider_modes():
+    for mode in ("auto", "mt5", "manual"):
+        assert Settings(_env_file=None, price_provider=mode).price_provider == mode
+
+
+def test_settings_reject_unknown_price_provider():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, price_provider="telegram")
+
+
+def test_settings_reject_non_positive_max_quote_age_seconds():
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, max_quote_age_seconds=0)

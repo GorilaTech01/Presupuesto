@@ -1,4 +1,5 @@
-"""CLI entry point (section 25; monitoring commands added in V1.1).
+"""CLI entry point (section 25; monitoring added in V1.1; automatic
+execution-price input added in V1.1.1).
 
 python -m app analyze SYMBOL   # quick single-asset fundamental read
 python -m app weekly           # full 3-candidate weekly pipeline
@@ -8,6 +9,7 @@ python -m app journal enter --opportunity-id <id> --price <price>  # record a ma
 python -m app journal skip --opportunity-id <id>                   # record a manual skip
 python -m app evaluate         # paper-trading performance + benchmark export
 python -m app monitor          # one fundamental re-evaluation pass over monitored opportunities
+python -m app quote SYMBOL     # current bid/ask via PRICE_PROVIDER (never a directional signal)
 """
 
 from __future__ import annotations
@@ -19,9 +21,12 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from app.broker.symbol_resolver import BrokerSymbolResolver
 from app.catalysts.service import CatalystService, annotate_thesis_impact
+from app.common.errors import DataSourceUnavailable, StaleDataError, SymbolNotVerifiable
 from app.common.event_bus import DomainEvent
 from app.common.logging import configure_logging
+from app.common.time_utils import format_utc
 from app.config.settings import get_settings
 from app.domain.enums import JournalStatus
 from app.fundamental.candidate import evaluate_candidate, indicators_for_asset
@@ -29,6 +34,7 @@ from app.fundamental.decision import FundamentalDecisionEngine
 from app.journal.benchmark import export_benchmark_csv, export_benchmark_jsonl
 from app.journal.journal import RecommendationJournal
 from app.journal.metrics import compute_performance
+from app.market.price_router import build_price_provider
 from app.market.universe import get_asset
 from app.monitor.alerts import AlertPolicy, ConsoleAlertSink
 from app.monitor.service import TradeOpportunityMonitorService
@@ -315,6 +321,43 @@ def monitor(
             console.print(payload_json)
     finally:
         service.close()
+
+
+@app.command()
+def quote(
+    symbol: str = typer.Argument(..., help="Asset to quote, e.g. EURUSD, XAUUSD, BTCUSD."),
+) -> None:
+    """Print the current bid/ask via PRICE_PROVIDER (auto/mt5/manual).
+
+    For inspection only -- this never feeds into fundamental_bias, BUY/SELL
+    direction, conviction, or catalyst confirmation. See docs/monitoring.md.
+    """
+    configure_logging()
+    settings = get_settings()
+    symbol = symbol.strip().upper()
+    resolver = BrokerSymbolResolver()
+    provider = build_price_provider(settings)
+    try:
+        resolved = resolver.resolve(symbol)
+    except SymbolNotVerifiable as exc:
+        console.print(f"[red]SYMBOL_UNVERIFIED: {exc}[/red]")
+        raise typer.Exit(code=1) from None
+    try:
+        market_quote = provider.get_quote(resolved.broker_symbol)
+    except StaleDataError as exc:
+        console.print(f"[yellow]PRICE_STALE: {exc}[/yellow]")
+        raise typer.Exit(code=1) from None
+    except DataSourceUnavailable as exc:
+        console.print(f"[red]PRICE_UNAVAILABLE: {exc}[/red]")
+        raise typer.Exit(code=1) from None
+    console.print(f"Symbol: {symbol}")
+    console.print(f"Broker symbol: {resolved.broker_symbol}")
+    console.print(f"Bid: {market_quote.bid}")
+    console.print(f"Ask: {market_quote.ask}")
+    console.print(f"Spread: {market_quote.spread}")
+    console.print(f"Timestamp: {format_utc(market_quote.timestamp)}")
+    console.print(f"Source: {market_quote.source}")
+    console.print(f"Fresh: {'YES' if market_quote.freshness.value == 'FRESH' else 'NO'}")
 
 
 @app.command()

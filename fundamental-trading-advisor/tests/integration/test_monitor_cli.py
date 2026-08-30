@@ -188,3 +188,28 @@ def test_journal_enter_records_manual_entry_never_sends_an_order(tmp_path: Path,
     updated = journal.find("rec-cli-1")
     assert updated is not None
     assert updated.entry_price_actual_or_simulated == 1.1005
+
+
+def test_quote_command_reports_price_unavailable_with_no_provider_configured(
+    tmp_path: Path, monkeypatch
+):
+    """No manual_prices.json and no MetaTrader5 install in this sandbox --
+    the CLI must fail closed with PRICE_UNAVAILABLE, never a guessed price."""
+    _env(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["quote", "EURUSD"])
+    assert result.exit_code == 1
+    assert "PRICE_UNAVAILABLE" in result.output
+
+
+def test_quote_command_prints_bid_ask_from_manual_file(tmp_path: Path, monkeypatch):
+    _env(tmp_path, monkeypatch)
+    settings = _settings_for(tmp_path)
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    (settings.data_dir / "manual_prices.json").write_text(
+        json.dumps({"EURUSD": {"bid": 1.1000, "ask": 1.1002, "as_of": "2026-09-01T12:00:00Z"}})
+    )
+    result = runner.invoke(app, ["quote", "EURUSD"])
+    assert result.exit_code == 0
+    assert "Bid: 1.1" in result.output
+    assert "Source: MANUAL_FILE" in result.output
+    assert "Fresh: YES" in result.output

@@ -42,6 +42,12 @@ def render_no_change(opportunity: MonitoredTradeOpportunity, timezone_name: str)
         if opportunity.trade_action is TradeAction.WAIT
         else opportunity.trade_action.value,
     ]
+    if opportunity.fundamental_setup_ready:
+        lines += [
+            "",
+            "Fundamental setup: READY.",
+            f"Blocked only on: {opportunity.readiness_blocker or 'operational input pending'}.",
+        ]
     return "\n".join(lines)
 
 
@@ -168,6 +174,8 @@ def to_machine_readable(
         "trigger_reasons": trigger_reasons,
         "readiness_reason": opportunity.readiness_reason,
         "cancellation_reason": opportunity.cancellation_reason,
+        "fundamental_setup_ready": opportunity.fundamental_setup_ready,
+        "readiness_blocker": opportunity.readiness_blocker,
         "invalidation": opportunity.fundamental_invalidation,
         "entry": tp.estimated_entry if tp else None,
         "stop_loss": tp.stop_loss if tp else None,

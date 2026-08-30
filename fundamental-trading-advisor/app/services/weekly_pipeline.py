@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 from app.broker.symbol_resolver import BrokerSymbolResolver
 from app.catalysts.service import CatalystService
-from app.common.errors import DataSourceUnavailable, SymbolNotVerifiable
+from app.common.errors import DataSourceUnavailable, StaleDataError, SymbolNotVerifiable
 from app.common.logging import get_logger, log_event
 from app.common.time_utils import format_local
 from app.config.settings import Settings
@@ -37,7 +37,8 @@ from app.fundamental.candidate import (
 from app.fundamental.decision import DecisionDraft, FundamentalDecisionEngine
 from app.journal.journal import RecommendationJournal
 from app.journal.models import JournalEntry
-from app.market.price_provider import ManualPriceFileProvider, PriceQuote
+from app.market.price_provider import CurrentMarketQuote
+from app.market.price_router import build_price_provider
 from app.market.universe import AssetDefinition, get_asset
 from app.monitor.service import TradeOpportunityMonitorService
 from app.risk.trade_math import build_trade_math
@@ -53,7 +54,7 @@ class _CandidateBundle:
     evaluation: CandidateEvaluation
     draft: DecisionDraft
     favored_country: str
-    price: PriceQuote | None
+    price: CurrentMarketQuote | None
     price_error: str | None
 
 
@@ -66,7 +67,7 @@ class WeeklyPipeline:
         )
         self.decision_engine = FundamentalDecisionEngine()
         self.symbol_resolver = BrokerSymbolResolver()
-        self.price_provider = ManualPriceFileProvider(settings.data_dir / "manual_prices.json")
+        self.price_provider = build_price_provider(settings)
         self.journal = RecommendationJournal(settings.journal_dir / "journal.jsonl")
         # V1.1: keeps the strongest candidate under fundamental observation
         # after this run (docs/monitoring.md). Uses the exact same scoring/
@@ -145,7 +146,7 @@ class WeeklyPipeline:
         try:
             resolved = self.symbol_resolver.resolve(definition.asset)
             price = self.price_provider.get_quote(resolved.broker_symbol)
-        except (DataSourceUnavailable, SymbolNotVerifiable) as exc:
+        except (DataSourceUnavailable, StaleDataError, SymbolNotVerifiable) as exc:
             price_error = str(exc)
 
         return _CandidateBundle(
@@ -219,7 +220,7 @@ class WeeklyPipeline:
             asset=definition.asset,
             broker_symbol=resolved.broker_symbol if resolved else "UNVERIFIED",
             current_price=bundle.price.mid if bundle.price else None,
-            price_as_of=bundle.price.as_of if bundle.price else None,
+            price_as_of=bundle.price.timestamp if bundle.price else None,
             liquidity_note=(
                 "Major/standard Pepperstone MT5 instrument; verify live spread before sizing."
             ),

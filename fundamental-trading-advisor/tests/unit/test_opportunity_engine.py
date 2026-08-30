@@ -24,6 +24,11 @@ from app.domain.models import CatalystEvent, TradePlan
 from app.fundamental.decision import DecisionDraft
 from app.monitor.opportunity_engine import (
     FUNDAMENTAL_BIAS_EPSILON,
+    READINESS_BLOCKER_EXECUTION_BLOCKED_SPREAD,
+    READINESS_BLOCKER_PRICE_STALE,
+    READINESS_BLOCKER_PRICE_UNAVAILABLE,
+    READINESS_BLOCKER_RISK_PLAN_INFEASIBLE,
+    READINESS_BLOCKER_SYMBOL_UNVERIFIED,
     evaluate_opportunity,
     fundamental_bias_from_score,
     monitoring_interest_threshold,
@@ -442,3 +447,241 @@ def test_ready_to_trade_preserves_conviction_and_breakdown_from_draft():
     assert result.conviction == 68
     assert result.conviction_breakdown is breakdown
     assert result.conviction_breakdown.expectations_penalty == 8
+
+
+# --------------------------------------------------------------------------
+# V1.1.1: fundamental_setup_ready / readiness_blocker
+# --------------------------------------------------------------------------
+
+
+def test_fundamentally_pending_states_are_not_setup_ready():
+    """WAIT states caused by fundamentals/catalysts (not price/symbol/risk)
+    must not claim fundamental_setup_ready -- that flag is specifically for
+    'fundamentals cleared, only an operational input is missing'."""
+    pending = _catalyst(actual=None)
+    draft = _draft(
+        direction=Direction.SELL, trade_action=ExecutionReadiness.ENTER_NOW, catalysts=[pending]
+    )
+    result = evaluate_opportunity(
+        draft=draft,
+        score=-0.9,
+        favored_country="US",
+        now=_NOW,
+        valid_until=_VALID_UNTIL,
+        min_bias_for_trade=MIN_BIAS,
+        trade_math_result=_FEASIBLE_MATH,
+        symbol_resolved=True,
+        trade_plan_builder=_build_plan,
+    )
+    assert result.trade_action is TradeAction.WAIT
+    assert result.fundamental_setup_ready is False
+    assert result.readiness_blocker is None
+
+
+def test_no_price_feed_sets_price_unavailable_blocker_by_default():
+    draft = _draft(
+        direction=Direction.SELL, trade_action=ExecutionReadiness.ENTER_NOW, catalysts=[]
+    )
+    result = evaluate_opportunity(
+        draft=draft,
+        score=-0.9,
+        favored_country="US",
+        now=_NOW,
+        valid_until=_VALID_UNTIL,
+        min_bias_for_trade=MIN_BIAS,
+        trade_math_result=None,
+        symbol_resolved=True,
+        trade_plan_builder=_build_plan,
+    )
+    assert result.trade_action is TradeAction.WAIT
+    assert result.fundamental_setup_ready is True
+    assert result.readiness_blocker == READINESS_BLOCKER_PRICE_UNAVAILABLE
+
+
+def test_caller_supplied_price_blocker_overrides_generic_default():
+    draft = _draft(
+        direction=Direction.SELL, trade_action=ExecutionReadiness.ENTER_NOW, catalysts=[]
+    )
+    result = evaluate_opportunity(
+        draft=draft,
+        score=-0.9,
+        favored_country="US",
+        now=_NOW,
+        valid_until=_VALID_UNTIL,
+        min_bias_for_trade=MIN_BIAS,
+        trade_math_result=None,
+        symbol_resolved=True,
+        trade_plan_builder=_build_plan,
+        price_blocker=READINESS_BLOCKER_PRICE_STALE,
+    )
+    assert result.readiness_blocker == READINESS_BLOCKER_PRICE_STALE
+
+
+def test_unresolved_symbol_blocker_takes_priority_over_missing_price():
+    draft = _draft(
+        direction=Direction.SELL, trade_action=ExecutionReadiness.ENTER_NOW, catalysts=[]
+    )
+    result = evaluate_opportunity(
+        draft=draft,
+        score=-0.9,
+        favored_country="US",
+        now=_NOW,
+        valid_until=_VALID_UNTIL,
+        min_bias_for_trade=MIN_BIAS,
+        trade_math_result=None,
+        symbol_resolved=False,
+        trade_plan_builder=_build_plan,
+        price_blocker=READINESS_BLOCKER_PRICE_STALE,
+    )
+    assert result.readiness_blocker == READINESS_BLOCKER_SYMBOL_UNVERIFIED
+
+
+def test_spread_infeasibility_sets_execution_blocked_spread():
+    draft = _draft(
+        direction=Direction.SELL, trade_action=ExecutionReadiness.ENTER_NOW, catalysts=[]
+    )
+    infeasible = TradeMathResult(
+        feasible=False,
+        reason="spread (0.00500) is too wide relative to the computed stop distance",
+    )
+    result = evaluate_opportunity(
+        draft=draft,
+        score=-0.9,
+        favored_country="US",
+        now=_NOW,
+        valid_until=_VALID_UNTIL,
+        min_bias_for_trade=MIN_BIAS,
+        trade_math_result=infeasible,
+        symbol_resolved=True,
+        trade_plan_builder=_build_plan,
+    )
+    assert result.readiness_blocker == READINESS_BLOCKER_EXECUTION_BLOCKED_SPREAD
+
+
+def test_non_spread_infeasibility_sets_generic_risk_plan_blocker():
+    draft = _draft(
+        direction=Direction.SELL, trade_action=ExecutionReadiness.ENTER_NOW, catalysts=[]
+    )
+    infeasible = TradeMathResult(feasible=False, reason="risk/reward 1.20 below minimum 1.5")
+    result = evaluate_opportunity(
+        draft=draft,
+        score=-0.9,
+        favored_country="US",
+        now=_NOW,
+        valid_until=_VALID_UNTIL,
+        min_bias_for_trade=MIN_BIAS,
+        trade_math_result=infeasible,
+        symbol_resolved=True,
+        trade_plan_builder=_build_plan,
+    )
+    assert result.readiness_blocker == READINESS_BLOCKER_RISK_PLAN_INFEASIBLE
+
+
+def test_ready_to_trade_has_no_readiness_blocker():
+    draft = _draft(
+        direction=Direction.SELL, trade_action=ExecutionReadiness.ENTER_NOW, catalysts=[]
+    )
+    result = evaluate_opportunity(
+        draft=draft,
+        score=-0.9,
+        favored_country="US",
+        now=_NOW,
+        valid_until=_VALID_UNTIL,
+        min_bias_for_trade=MIN_BIAS,
+        trade_math_result=_FEASIBLE_MATH,
+        symbol_resolved=True,
+        trade_plan_builder=_build_plan,
+    )
+    assert result.trade_action is TradeAction.READY_TO_TRADE
+    assert result.fundamental_setup_ready is True
+    assert result.readiness_blocker is None
+
+
+def test_price_becoming_available_flips_wait_to_ready_with_no_fundamental_change():
+    """The exact scenario from the V1.1.1 spec: same fundamentals, only a
+    price feed appears -- trade_action must flip to READY_TO_TRADE without
+    any fundamental input changing."""
+    draft = _draft(
+        direction=Direction.SELL, trade_action=ExecutionReadiness.ENTER_NOW, catalysts=[]
+    )
+    common_kwargs = dict(
+        draft=draft,
+        score=-0.9,
+        favored_country="US",
+        now=_NOW,
+        valid_until=_VALID_UNTIL,
+        min_bias_for_trade=MIN_BIAS,
+        symbol_resolved=True,
+        trade_plan_builder=_build_plan,
+    )
+    before = evaluate_opportunity(trade_math_result=None, **common_kwargs)
+    after = evaluate_opportunity(trade_math_result=_FEASIBLE_MATH, **common_kwargs)
+
+    assert before.trade_action is TradeAction.WAIT
+    assert after.trade_action is TradeAction.READY_TO_TRADE
+    assert before.fundamental_bias == after.fundamental_bias
+
+
+# --------------------------------------------------------------------------
+# V1.1.1: price can never act as a directional signal
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "other_math",
+    [
+        TradeMathResult(
+            feasible=True,
+            reason=None,
+            entry=1.5000,
+            stop_loss=1.4000,
+            take_profit=1.7000,
+            distance_to_sl=0.1,
+            distance_to_tp=0.2,
+            risk_reward=2.0,
+        ),
+        TradeMathResult(
+            feasible=True,
+            reason=None,
+            entry=0.9000,
+            stop_loss=0.9500,
+            take_profit=0.8000,
+            distance_to_sl=0.05,
+            distance_to_tp=0.1,
+            risk_reward=2.0,
+        ),
+        None,
+    ],
+)
+def test_changing_price_or_spread_never_flips_fundamental_bias(other_math):
+    """BULLISH/BEARISH must come only from the fundamental score -- varying
+    entry/stop/spread (or removing the price feed entirely) must never
+    change fundamental_bias, only operational trade_action."""
+    draft = _draft(
+        direction=Direction.SELL, trade_action=ExecutionReadiness.ENTER_NOW, catalysts=[]
+    )
+    baseline = evaluate_opportunity(
+        draft=draft,
+        score=-0.9,
+        favored_country="US",
+        now=_NOW,
+        valid_until=_VALID_UNTIL,
+        min_bias_for_trade=MIN_BIAS,
+        trade_math_result=_FEASIBLE_MATH,
+        symbol_resolved=True,
+        trade_plan_builder=_build_plan,
+    )
+    varied = evaluate_opportunity(
+        draft=draft,
+        score=-0.9,
+        favored_country="US",
+        now=_NOW,
+        valid_until=_VALID_UNTIL,
+        min_bias_for_trade=MIN_BIAS,
+        trade_math_result=other_math,
+        symbol_resolved=True,
+        trade_plan_builder=_build_plan,
+    )
+    assert baseline.fundamental_bias == varied.fundamental_bias == FundamentalBias.BEARISH
+    assert baseline.conviction == varied.conviction
+    assert baseline.conviction_breakdown == varied.conviction_breakdown

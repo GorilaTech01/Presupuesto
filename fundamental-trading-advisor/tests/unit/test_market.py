@@ -36,7 +36,9 @@ def test_manual_price_provider_reads_quote(tmp_path: Path):
     quote = provider.get_quote("EURUSD")
     assert quote.mid == pytest.approx(1.1001)
     assert quote.spread == pytest.approx(0.0002)
-    assert quote.as_of.tzinfo is not None
+    assert quote.timestamp.tzinfo is not None
+    assert quote.source == "MANUAL_FILE"
+    assert quote.broker_symbol == "EURUSD"
 
 
 def test_manual_price_provider_missing_symbol_raises(tmp_path: Path):

@@ -644,3 +644,207 @@ def test_incremental_and_full_refresh_agree_when_no_new_data_exists(tmp_path: Pa
         assert incremental_result.fundamental_bias == full_result.fundamental_bias
     finally:
         service_incremental.close()
+
+
+# --------------------------------------------------------------------------
+# V1.1.1: automatic execution price input -- PRICE_UNAVAILABLE / PRICE_STALE
+# --------------------------------------------------------------------------
+
+
+def test_refresh_one_confirmed_fundamentals_no_price_file_yields_price_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Confirmed fundamentals + no price source configured must stay at
+    WAIT with fundamental_setup_ready=True and readiness_blocker=
+    PRICE_UNAVAILABLE -- never a silent NO_TRADE, never a fabricated price."""
+    settings = _settings(tmp_path)
+    service = TradeOpportunityMonitorService(settings)
+    try:
+        definition = get_asset("EURUSD")
+        wait_draft = _draft(direction=Direction.SELL, trade_action=ExecutionReadiness.ENTER_NOW)
+        opportunity = service.create_opportunity(
+            definition=definition,
+            draft=wait_draft,
+            evaluation_score=-0.9,
+            favored_country="US",
+            price=None,
+            recommendation_id="rec-price-1",
+            data_cutoff=_NOW,
+        )
+        assert opportunity is not None
+
+        confirmed_draft = _draft(
+            direction=Direction.SELL,
+            trade_action=ExecutionReadiness.ENTER_NOW,
+            catalysts=[_catalyst(actual=200.0, consensus=150.0)],
+        )
+
+        def fake_build_decision_draft(
+            defn, fetch_result, *, catalyst_service, decision_engine, timezone_name
+        ):
+            evaluation = CandidateEvaluation(definition=defn, score=_fake_score(), bias=-0.9)
+            return confirmed_draft, evaluation, "US"
+
+        monkeypatch.setattr(service_module, "build_decision_draft", fake_build_decision_draft)
+
+        # no data/manual_prices.json exists, and MetaTrader5 isn't installed
+        # in this sandbox -- both providers fail closed.
+        updated, _ = service.refresh_one(opportunity)
+
+        assert updated.trade_action is TradeAction.WAIT
+        assert updated.fundamental_setup_ready is True
+        assert updated.readiness_blocker == "PRICE_UNAVAILABLE"
+    finally:
+        service.close()
+
+
+def test_refresh_one_stale_price_yields_price_stale_blocker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    settings = _settings(tmp_path)
+    # a quote 2 hours old is well past the default 60s MAX_QUOTE_AGE_SECONDS
+    stale_timestamp = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    (tmp_path / "manual_prices.json").write_text(
+        json.dumps({"EURUSD": {"bid": 1.1000, "ask": 1.1002, "as_of": stale_timestamp}})
+    )
+    service = TradeOpportunityMonitorService(settings)
+    try:
+        definition = get_asset("EURUSD")
+        wait_draft = _draft(direction=Direction.SELL, trade_action=ExecutionReadiness.ENTER_NOW)
+        opportunity = service.create_opportunity(
+            definition=definition,
+            draft=wait_draft,
+            evaluation_score=-0.9,
+            favored_country="US",
+            price=None,
+            recommendation_id="rec-price-2",
+            data_cutoff=_NOW,
+        )
+        assert opportunity is not None
+
+        confirmed_draft = _draft(
+            direction=Direction.SELL,
+            trade_action=ExecutionReadiness.ENTER_NOW,
+            catalysts=[_catalyst(actual=200.0, consensus=150.0)],
+        )
+
+        def fake_build_decision_draft(
+            defn, fetch_result, *, catalyst_service, decision_engine, timezone_name
+        ):
+            evaluation = CandidateEvaluation(definition=defn, score=_fake_score(), bias=-0.9)
+            return confirmed_draft, evaluation, "US"
+
+        monkeypatch.setattr(service_module, "build_decision_draft", fake_build_decision_draft)
+
+        updated, _ = service.refresh_one(opportunity)
+
+        assert updated.trade_action is TradeAction.WAIT
+        assert updated.fundamental_setup_ready is True
+        assert updated.readiness_blocker == "PRICE_STALE"
+    finally:
+        service.close()
+
+
+def test_price_becoming_available_reaches_ready_to_trade_without_fundamental_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The exact V1.1.1 scenario: fundamentals confirmed once, price absent
+    then present across two refreshes -- WAIT -> READY_TO_TRADE, with
+    fundamental_bias identical both times."""
+    settings = _settings(tmp_path)
+    service = TradeOpportunityMonitorService(settings)
+    try:
+        definition = get_asset("EURUSD")
+        wait_draft = _draft(direction=Direction.SELL, trade_action=ExecutionReadiness.ENTER_NOW)
+        opportunity = service.create_opportunity(
+            definition=definition,
+            draft=wait_draft,
+            evaluation_score=-0.9,
+            favored_country="US",
+            price=None,
+            recommendation_id="rec-price-3",
+            data_cutoff=_NOW,
+        )
+        assert opportunity is not None
+
+        confirmed_draft = _draft(
+            direction=Direction.SELL,
+            trade_action=ExecutionReadiness.ENTER_NOW,
+            catalysts=[_catalyst(actual=200.0, consensus=150.0)],
+        )
+
+        def fake_build_decision_draft(
+            defn, fetch_result, *, catalyst_service, decision_engine, timezone_name
+        ):
+            evaluation = CandidateEvaluation(definition=defn, score=_fake_score(), bias=-0.9)
+            return confirmed_draft, evaluation, "US"
+
+        monkeypatch.setattr(service_module, "build_decision_draft", fake_build_decision_draft)
+
+        before, _ = service.refresh_one(opportunity)
+        assert before.trade_action is TradeAction.WAIT
+        assert before.readiness_blocker == "PRICE_UNAVAILABLE"
+
+        _write_manual_price(tmp_path, "EURUSD")
+        after, state_changed = service.refresh_one(before)
+
+        assert after.trade_action is TradeAction.READY_TO_TRADE
+        assert state_changed is True
+        assert after.fundamental_bias == before.fundamental_bias
+    finally:
+        service.close()
+
+
+def test_changing_bid_ask_across_refreshes_never_changes_fundamental_bias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Same fundamentals, two different manual quotes -- fundamental_bias
+    and conviction must be byte-for-byte identical; only the trade plan's
+    entry/SL/TP numbers may differ."""
+    settings = _settings(tmp_path)
+    service = TradeOpportunityMonitorService(settings)
+    try:
+        definition = get_asset("EURUSD")
+        wait_draft = _draft(direction=Direction.SELL, trade_action=ExecutionReadiness.ENTER_NOW)
+        opportunity = service.create_opportunity(
+            definition=definition,
+            draft=wait_draft,
+            evaluation_score=-0.9,
+            favored_country="US",
+            price=None,
+            recommendation_id="rec-price-4",
+            data_cutoff=_NOW,
+        )
+        assert opportunity is not None
+
+        confirmed_draft = _draft(
+            direction=Direction.SELL,
+            trade_action=ExecutionReadiness.ENTER_NOW,
+            catalysts=[_catalyst(actual=200.0, consensus=150.0)],
+        )
+
+        def fake_build_decision_draft(
+            defn, fetch_result, *, catalyst_service, decision_engine, timezone_name
+        ):
+            evaluation = CandidateEvaluation(definition=defn, score=_fake_score(), bias=-0.9)
+            return confirmed_draft, evaluation, "US"
+
+        monkeypatch.setattr(service_module, "build_decision_draft", fake_build_decision_draft)
+
+        _write_manual_price(tmp_path, "EURUSD")  # 1.1000 / 1.1002
+        first, _ = service.refresh_one(opportunity)
+        assert first.trade_action is TradeAction.READY_TO_TRADE
+
+        (tmp_path / "manual_prices.json").write_text(
+            json.dumps({"EURUSD": {"bid": 1.2500, "ask": 1.2503, "as_of": "2026-09-01T12:00:00Z"}})
+        )
+        second, _ = service.refresh_one(first)
+        assert second.trade_action is TradeAction.READY_TO_TRADE
+
+        assert first.fundamental_bias == second.fundamental_bias == FundamentalBias.BEARISH
+        assert first.direction == second.direction
+        assert first.conviction == second.conviction
+        assert first.trade_plan is not None and second.trade_plan is not None
+        assert first.trade_plan.estimated_entry != second.trade_plan.estimated_entry
+    finally:
+        service.close()

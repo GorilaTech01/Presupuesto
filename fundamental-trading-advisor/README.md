@@ -95,8 +95,10 @@ cp .env.example .env   # then fill in what you have (all optional)
 | `ANTHROPIC_API_KEY` | Optional narrative synthesis layer (never a data source) | unset (disabled) |
 | `FRED_API_KEY` | Free key for FRED (US rates, CPI, PCE, NFP, JOLTS, yields, DXY) | unset |
 | `EIA_API_KEY` | Free key for EIA (oil/energy context) | unset |
-| `MT5_ENABLED` | Enables a future read-only MT5 connection (not implemented yet) | `false` |
+| `MT5_ENABLED` | Gates the read-only MT5 quote provider (V1.1.1, section 15a) -- with this `false`, `PRICE_PROVIDER=auto` never attempts a live terminal | `false` |
 | `AUTO_EXECUTION` | **Hard-blocked.** Setting `true` raises a config error at startup. | `false` |
+| `PRICE_PROVIDER` | `auto`/`mt5`/`manual` -- current-price source priority (V1.1.1, section 15a) | `auto` |
+| `MAX_QUOTE_AGE_SECONDS` | A quote older than this is rejected as `PRICE_STALE` | `60` |
 | `PAPER_TRADING` | Marks the journal as paper-trading mode | `true` |
 | `ACCOUNT_EQUITY` | Used for position sizing; omit to skip sizing | unset |
 | `RISK_PERCENT` | Fraction of equity risked per trade; capped at 1% (`AGGRESSIVE_MAX`) | `0.005` (0.5%, MODERATE) |
@@ -175,6 +177,7 @@ uv run python -m app journal                        # list all journaled recomme
 uv run python -m app journal enter --opportunity-id <id> --price <price>  # manual entry ack (V1.1)
 uv run python -m app journal skip --opportunity-id <id>                  # manual skip ack (V1.1)
 uv run python -m app monitor                        # V1.1: one fundamental re-evaluation pass
+uv run python -m app quote EURUSD                   # V1.1.1: current bid/ask (never a directional signal)
 uv run python -m app evaluate --export-csv benchmark.csv --export-jsonl benchmark.jsonl
 ```
 
@@ -284,6 +287,18 @@ design, the READY_TO_TRADE gate, alerting, persistence, and limitations.
 Same constraints as `weekly`: no auto-execution, no technical analysis, no
 external notification channel wired up yet.
 
+**V1.1.1** adds automatic (still read-only) execution-price acquisition:
+once fundamentals/catalysts confirm, `PRICE_PROVIDER` (`auto`/`mt5`/
+`manual`) fetches a current bid/ask -- from a locally-running MT5 terminal
+when `MT5_ENABLED=true`, otherwise the existing manual price file -- used
+*only* for entry/SL/TP/R:R/position sizing, never to decide direction.
+When fundamentals are confirmed but no fresh price is available, the
+opportunity stays at `WAIT` with `fundamental_setup_ready=true` and a
+`readiness_blocker` (`PRICE_UNAVAILABLE`/`PRICE_STALE`/`SYMBOL_UNVERIFIED`/
+`EXECUTION_BLOCKED_SPREAD`) explaining exactly what's still missing.
+`python -m app quote EURUSD` inspects a quote directly. See
+`docs/monitoring.md` section 2a.
+
 ## 16. How to add a new asset
 
 1. Add an `AssetDefinition` to `app/market/universe.py` (base/quote
@@ -307,7 +322,7 @@ external notification channel wired up yet.
 ## 18. Testing & quality gates
 
 ```bash
-uv run pytest            # 195 tests, no real network calls (respx + fixtures)
+uv run pytest            # 240 tests, no real network calls (respx + fixtures)
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy app
@@ -338,10 +353,14 @@ historical demonstration, not a live command.
 
 - Several official sources are pending (see section 7 above): ISM PMI
   values, direct BEA/Treasury/SEC/OPEC/BoE/BoJ/ONS integrations.
-- No live MT5 connection; prices come from a manually-maintained
-  `data/manual_prices.json` (see `app/market/price_provider.py`) until a
-  real Market Watch read is wired up. **Always re-verify price, spread,
-  and exact symbol name in MT5 before executing manually.**
+- A read-only MT5 quote connection exists (V1.1.1, `MT5_ENABLED=true` +
+  `PRICE_PROVIDER=auto`/`mt5`), but only works on a machine with a real,
+  already-logged-in MT5 terminal and the Windows-only `MetaTrader5` package
+  installed; otherwise (and by default) prices come from the manually-
+  maintained `data/manual_prices.json` (see `app/market/price_provider.py`).
+  Position-sizing math still uses the fixture-based `SymbolSpec`, not any
+  live-terminal spec the MT5 provider captures. **Always re-verify price,
+  spread, and exact symbol name in MT5 before executing manually.**
 - No paper-trade evaluator that replays real market data against a
   proposed plan to auto-populate exit/PnL/R-multiple; `evaluate` only
   aggregates whatever outcomes are already recorded.
@@ -364,7 +383,9 @@ historical demonstration, not a live command.
 1. Add GBP/JPY/AUD/CHF/CAD currency scoring so the "exactly 3 finalists"
    selection can eventually be drawn from the full universe automatically
    rather than specified on the command line.
-2. Wire a real MT5 read-only connection for live bid/ask/spread/spec.
+2. Prefer the live MT5 spec (tick size/value, contract size, volume
+   constraints) over the fixture-based `SymbolSpec` when the MT5 provider
+   is enabled and returns one -- position sizing currently ignores it.
 3. Build the decoupled paper-trade evaluator (replay real historical
    prices against `PROPOSED` journal entries to populate exit/PnL/R).
 4. Add a licensed or manual-entry ISM PMI feed.

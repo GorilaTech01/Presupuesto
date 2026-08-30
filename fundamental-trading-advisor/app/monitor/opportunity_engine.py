@@ -51,6 +51,18 @@ MONITORING_INTEREST_RATIO = 0.5
 
 FUNDAMENTAL_BIAS_EPSILON = 0.05
 
+# Readiness blockers (V1.1.1): a stable, machine-readable reason a fundamentally-
+# ready opportunity (`fundamental_setup_ready=True`) is still not READY_TO_TRADE.
+# These are purely operational -- price/symbol/risk-plan -- never fundamental;
+# see `docs/monitoring.md` section on PRICE_UNAVAILABLE/PRICE_STALE. Priority when
+# more than one applies: identity (symbol) > data availability (price) > risk-plan
+# feasibility (spread/RR).
+READINESS_BLOCKER_SYMBOL_UNVERIFIED = "SYMBOL_UNVERIFIED"
+READINESS_BLOCKER_PRICE_UNAVAILABLE = "PRICE_UNAVAILABLE"
+READINESS_BLOCKER_PRICE_STALE = "PRICE_STALE"
+READINESS_BLOCKER_EXECUTION_BLOCKED_SPREAD = "EXECUTION_BLOCKED_SPREAD"
+READINESS_BLOCKER_RISK_PLAN_INFEASIBLE = "RISK_PLAN_INFEASIBLE"
+
 
 def monitoring_interest_threshold(min_bias_for_trade: float) -> float:
     return min_bias_for_trade * MONITORING_INTEREST_RATIO
@@ -75,6 +87,12 @@ class OpportunityEvaluation:
     conviction_breakdown: ConvictionBreakdown | None
     readiness_reason: str | None
     cancellation_reason: str | None
+    # V1.1.1: True once fundamentals/catalysts/conviction have all cleared,
+    # independent of whether price/symbol/risk-plan gates have. Lets callers
+    # distinguish "still waiting on fundamentals" from "fundamentals are
+    # done, only an operational input is missing" -- see readiness_blocker.
+    fundamental_setup_ready: bool = False
+    readiness_blocker: str | None = None
     reasons: list[str] = field(default_factory=list)
     trade_plan: TradePlan | None = None
 
@@ -90,6 +108,7 @@ def evaluate_opportunity(
     trade_math_result: TradeMathResult | None,
     symbol_resolved: bool,
     trade_plan_builder: TradePlanBuilder | None = None,
+    price_blocker: str | None = None,
 ) -> OpportunityEvaluation:
     """Evaluates the 12 READY_TO_TRADE criteria (spec section 6) against an
     already-computed `DecisionDraft`. `trade_plan_builder`, if given, is
@@ -97,6 +116,12 @@ def evaluate_opportunity(
     `TradePlan` that a READY_TO_TRADE opportunity must carry -- kept as a
     callback so this module never needs to import price/broker plumbing
     directly.
+
+    `price_blocker` (V1.1.1), if given, is the caller's own diagnosis of why
+    `trade_math_result` is `None` -- `READINESS_BLOCKER_PRICE_UNAVAILABLE` or
+    `READINESS_BLOCKER_PRICE_STALE` -- used only to make the operational
+    `readiness_blocker` more specific than the generic default; it never
+    changes any state transition.
     """
     bias = fundamental_bias_from_score(score)
     trigger_eval = FundamentalTriggerEvaluator().evaluate(draft.catalysts, favored_country)
@@ -185,12 +210,21 @@ def evaluate_opportunity(
     # valid risk plan, a resolvable broker symbol, and a live price feed.
     if trade_math_result is None or not trade_math_result.feasible or not symbol_resolved:
         blocking = []
+        blocker_code: str | None = None
         if not symbol_resolved:
             blocking.append("symbol not verifiable for this broker")
+            blocker_code = READINESS_BLOCKER_SYMBOL_UNVERIFIED
         if trade_math_result is None:
             blocking.append("no price feed available to build a risk plan")
+            blocker_code = blocker_code or price_blocker or READINESS_BLOCKER_PRICE_UNAVAILABLE
         elif not trade_math_result.feasible:
             blocking.append(f"trade math infeasible: {trade_math_result.reason}")
+            reason_text = (trade_math_result.reason or "").lower()
+            blocker_code = blocker_code or (
+                READINESS_BLOCKER_EXECUTION_BLOCKED_SPREAD
+                if "spread" in reason_text
+                else READINESS_BLOCKER_RISK_PLAN_INFEASIBLE
+            )
         return OpportunityEvaluation(
             fundamental_bias=bias,
             trade_action=TradeAction.WAIT,
@@ -199,6 +233,8 @@ def evaluate_opportunity(
             conviction_breakdown=draft.conviction_breakdown,
             readiness_reason=None,
             cancellation_reason=None,
+            fundamental_setup_ready=True,
+            readiness_blocker=blocker_code,
             reasons=blocking + trigger_eval.reasons,
         )
 
@@ -212,6 +248,7 @@ def evaluate_opportunity(
             conviction_breakdown=draft.conviction_breakdown,
             readiness_reason=None,
             cancellation_reason=None,
+            fundamental_setup_ready=True,
             reasons=["no trade plan builder available"] + trigger_eval.reasons,
         )
 
@@ -226,6 +263,7 @@ def evaluate_opportunity(
             "confirmed; within horizon; symbol verified; risk plan meets minimum R:R"
         ),
         cancellation_reason=None,
+        fundamental_setup_ready=True,
         reasons=trigger_eval.reasons,
         trade_plan=trade_plan,
     )

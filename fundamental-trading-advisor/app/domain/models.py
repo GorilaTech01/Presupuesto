@@ -310,6 +310,12 @@ class MonitoredTradeOpportunity(BaseModel):
     trigger_status: TriggerStatus
     readiness_reason: str | None = None
     cancellation_reason: str | None = None
+    # V1.1.1: True once fundamentals/catalysts/conviction have all cleared
+    # (see app.monitor.opportunity_engine), independent of whether an
+    # operational input (price/symbol/risk-plan) is also ready. When this is
+    # True but trade_action is still WAIT, readiness_blocker names why.
+    fundamental_setup_ready: bool = False
+    readiness_blocker: str | None = None
     source_snapshot: list[str] = Field(default_factory=list)
     decision_history: list[OpportunityHistoryEntry] = Field(default_factory=list)
     trade_plan: TradePlan | None = None

@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 from app.broker.symbol_resolver import BrokerSymbolResolver, ResolvedSymbol
 from app.catalysts.service import CatalystService
-from app.common.errors import DataSourceUnavailable, SymbolNotVerifiable
+from app.common.errors import DataSourceUnavailable, StaleDataError, SymbolNotVerifiable
 from app.common.event_bus import DomainEvent, EventBus
 from app.common.lookahead import assert_no_lookahead
 from app.config.settings import Settings
@@ -32,10 +32,16 @@ from app.domain.models import (
 from app.fundamental.candidate import build_decision_draft, indicators_for_asset
 from app.fundamental.decision import MIN_BIAS_FOR_TRADE, DecisionDraft, FundamentalDecisionEngine
 from app.journal.journal import RecommendationJournal
-from app.market.price_provider import ManualPriceFileProvider, PriceQuote
+from app.market.price_provider import CurrentMarketQuote
+from app.market.price_router import build_price_provider
 from app.market.universe import AssetDefinition, get_asset
 from app.monitor import events as monitor_events
-from app.monitor.opportunity_engine import OpportunityEvaluation, evaluate_opportunity
+from app.monitor.opportunity_engine import (
+    READINESS_BLOCKER_PRICE_STALE,
+    READINESS_BLOCKER_PRICE_UNAVAILABLE,
+    OpportunityEvaluation,
+    evaluate_opportunity,
+)
 from app.monitor.store import OpportunityEventLog, OpportunityStore
 from app.risk.trade_math import TradeMathResult, build_trade_math
 from app.sources.repository import FundamentalDataRepository
@@ -97,7 +103,7 @@ class TradeOpportunityMonitorService:
         )
         self.decision_engine = FundamentalDecisionEngine()
         self.symbol_resolver = BrokerSymbolResolver()
-        self.price_provider = ManualPriceFileProvider(settings.data_dir / "manual_prices.json")
+        self.price_provider = build_price_provider(settings)
         self.store = OpportunityStore(settings.data_dir / "monitor" / "opportunities.jsonl")
         self.event_log = OpportunityEventLog(
             settings.data_dir / "monitor" / "opportunity_events.jsonl"
@@ -117,12 +123,17 @@ class TradeOpportunityMonitorService:
         draft: DecisionDraft,
         evaluation_score: float,
         favored_country: str,
-        price: PriceQuote | None,
+        price: CurrentMarketQuote | None,
         recommendation_id: str,
         data_cutoff: datetime,
+        price_blocker: str | None = None,
     ) -> MonitoredTradeOpportunity | None:
         """Returns None when the candidate isn't worth monitoring at all
-        (NO_TRADE and below the monitoring-interest threshold)."""
+        (NO_TRADE and below the monitoring-interest threshold). `price` is
+        supplied by the caller (e.g. `WeeklyPipeline`, which resolves its
+        own quote); `price_blocker` is an optional, caller-diagnosed reason
+        `price` is `None` (`READINESS_BLOCKER_PRICE_UNAVAILABLE`/`_STALE`) --
+        omit it and a generic PRICE_UNAVAILABLE is assumed if needed."""
         now = datetime.now(UTC)
         valid_until = end_of_trading_week(now)
 
@@ -144,6 +155,7 @@ class TradeOpportunityMonitorService:
             trade_plan_builder=lambda d, m: self._build_trade_plan(
                 definition, symbol_resolved, d, m
             ),
+            price_blocker=price_blocker,
         )
 
         if evaluation.trade_action is TradeAction.NO_TRADE:
@@ -177,6 +189,8 @@ class TradeOpportunityMonitorService:
             trigger_status=evaluation.trigger_status,
             readiness_reason=evaluation.readiness_reason,
             cancellation_reason=evaluation.cancellation_reason,
+            fundamental_setup_ready=evaluation.fundamental_setup_ready,
+            readiness_blocker=evaluation.readiness_blocker,
             source_snapshot=draft.sources,
             decision_history=[_history_entry(now, evaluation, evaluation_score)],
             trade_plan=evaluation.trade_plan,
@@ -191,7 +205,7 @@ class TradeOpportunityMonitorService:
         self,
         definition: AssetDefinition,
         draft: DecisionDraft,
-        price: PriceQuote | None,
+        price: CurrentMarketQuote | None,
         resolved: ResolvedSymbol | None,
     ) -> TradeMathResult | None:
         if price is None or resolved is None:
@@ -284,9 +298,14 @@ class TradeOpportunityMonitorService:
             symbol_resolved = self.symbol_resolver.resolve(definition.asset)
 
         price = None
+        price_blocker: str | None = None
         if symbol_resolved is not None:
-            with contextlib.suppress(DataSourceUnavailable):
+            try:
                 price = self.price_provider.get_quote(symbol_resolved.broker_symbol)
+            except StaleDataError:
+                price_blocker = READINESS_BLOCKER_PRICE_STALE
+            except DataSourceUnavailable:
+                price_blocker = READINESS_BLOCKER_PRICE_UNAVAILABLE
 
         trade_math_result = self._build_trade_math(definition, draft, price, symbol_resolved)
 
@@ -302,6 +321,7 @@ class TradeOpportunityMonitorService:
             trade_plan_builder=lambda d, m: self._build_trade_plan(
                 definition, symbol_resolved, d, m
             ),
+            price_blocker=price_blocker,
         )
 
         previous_bias = opportunity.fundamental_bias
@@ -328,6 +348,8 @@ class TradeOpportunityMonitorService:
                 "trigger_status": evaluation.trigger_status,
                 "readiness_reason": evaluation.readiness_reason,
                 "cancellation_reason": evaluation.cancellation_reason,
+                "fundamental_setup_ready": evaluation.fundamental_setup_ready,
+                "readiness_blocker": evaluation.readiness_blocker,
                 "catalysts": draft.catalysts,
                 "source_snapshot": draft.sources,
                 "decision_history": [
