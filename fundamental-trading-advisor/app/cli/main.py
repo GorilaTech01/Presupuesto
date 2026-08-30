@@ -1,6 +1,8 @@
 """CLI entry point (section 25; monitoring added in V1.1; automatic
-execution-price input added in V1.1.1).
+execution-price input added in V1.1.1; `daily` orchestration added for
+manual daily use -- see docs/daily_workflow.md).
 
+python -m app daily            # morning routine: weekly + monitor --all + one consolidated review
 python -m app analyze SYMBOL   # quick single-asset fundamental read
 python -m app weekly           # full 3-candidate weekly pipeline
 python -m app report           # re-render the latest recommendation
@@ -39,6 +41,7 @@ from app.market.universe import get_asset
 from app.monitor.alerts import AlertPolicy, ConsoleAlertSink
 from app.monitor.service import TradeOpportunityMonitorService
 from app.monitor.store import OpportunityStore
+from app.reporting.daily_report import render_daily_review, render_other_opportunities
 from app.reporting.human_report import render_human_report
 from app.reporting.json_report import to_machine_readable
 from app.reporting.monitor_report import render_monitor_report
@@ -50,6 +53,74 @@ app = typer.Typer(
     add_completion=False, help="Fundamental-only trading advisor (READ/ANALYZE/RECOMMEND/LOG)."
 )
 console = Console()
+
+
+@app.command()
+def daily(
+    candidates: str = typer.Option(
+        "EURUSD,XAUUSD,BTCUSD", help="Exactly 3 comma-separated finalist symbols to compare."
+    ),
+    json_out: Path | None = typer.Option(
+        None, "--json-out", help="Write the day's consolidated machine-readable JSON here."
+    ),
+) -> None:
+    """Morning routine: pure orchestration of `weekly` + `monitor --all`,
+    then one consolidated human review. No new scoring, decision, or
+    monitoring logic -- see docs/daily_workflow.md for the recommended
+    cadence (this re-runs the full weekly comparison every time it's
+    called, which is appropriate once per session, not many times a day).
+    """
+    configure_logging()
+    settings = get_settings()
+    symbols = [s.strip().upper() for s in candidates.split(",") if s.strip()]
+    pipeline = WeeklyPipeline(settings)
+    try:
+        comparison = pipeline.run(symbols)
+        results = pipeline.monitor_service.refresh_all()
+    finally:
+        pipeline.close()
+
+    # Look today's opportunity up from the store directly, not just from
+    # `results`: refresh_all() correctly skips CANCELLED opportunities
+    # (terminal state, never re-evaluated again), so a same-day creation
+    # that was immediately cancelled by a contradicting catalyst would
+    # otherwise never be found here even though it IS today's outcome.
+    all_opportunities = pipeline.monitor_service.store.load_all()
+    todays_opportunity = next(
+        (o for o in all_opportunities if o.recommendation_id == pipeline.last_recommendation_id),
+        None,
+    )
+    others = [
+        opportunity
+        for opportunity, _state_changed in results
+        if todays_opportunity is None
+        or opportunity.opportunity_id != todays_opportunity.opportunity_id
+    ]
+
+    console.print(render_daily_review(comparison, todays_opportunity, settings.timezone))
+    other_text = render_other_opportunities(others, settings.timezone)
+    if other_text:
+        console.print(other_text)
+
+    payload = {
+        "weekly": to_machine_readable(comparison),
+        "todays_opportunity": (
+            monitor_to_machine_readable(todays_opportunity, state_changed=False)
+            if todays_opportunity is not None
+            else None
+        ),
+        "other_opportunities": [
+            monitor_to_machine_readable(o, state_changed=False) for o in others
+        ],
+    }
+    payload_json = json.dumps(payload, indent=2, default=str)
+    if json_out is not None:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(payload_json)
+        console.print(f"\n[dim]Machine-readable JSON written to {json_out}[/dim]")
+    else:
+        console.print("\n--- JSON ---")
+        console.print(payload_json)
 
 
 @app.command()

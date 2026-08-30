@@ -74,6 +74,10 @@ class WeeklyPipeline:
         # decision sequence as this pipeline -- see app.fundamental.candidate
         # .build_decision_draft and app.monitor.opportunity_engine.
         self.monitor_service = TradeOpportunityMonitorService(settings)
+        # Exposed purely so a caller (e.g. `python -m app daily`) can look up
+        # the MonitoredTradeOpportunity this run created/updated, if any,
+        # without guessing by asset/timestamp -- set at the end of run().
+        self.last_recommendation_id: str | None = None
 
     def close(self) -> None:
         self.repository.close()
@@ -125,6 +129,7 @@ class WeeklyPipeline:
             )
 
         recommendation_id = str(uuid.uuid4())
+        self.last_recommendation_id = recommendation_id
         self._journal_entry(comparison, recommendation_id)
         self._create_monitored_opportunity(bundles, comparison, recommendation_id)
         return comparison

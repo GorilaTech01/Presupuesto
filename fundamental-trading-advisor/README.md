@@ -12,6 +12,14 @@ ANALYSIS -> RECOMMENDATION -> YOU DECIDE -> MANUAL EXECUTION IN MT5
 This is a standalone project. It does not import from, depend on, or modify
 any other trading system in this repository.
 
+## Daily Manual Workflow
+
+For day-to-day manual use (run each morning, check on existing ideas,
+decide, execute in Pepperstone/MT5 yourself), see
+**[`docs/daily_workflow.md`](docs/daily_workflow.md)**. Short version:
+`python -m app daily` each morning, `python -m app monitor --all` whenever
+you want to re-check what's already being tracked.
+
 ## 1. Objective
 
 Given the current macro backdrop (monetary policy, inflation, employment,
@@ -169,6 +177,7 @@ degrades when it isn't.
 ## 9. CLI
 
 ```bash
+uv run python -m app daily                        # morning routine: weekly + monitor --all + one review
 uv run python -m app weekly                       # full 3-candidate pipeline
 uv run python -m app weekly --candidates EURUSD,GBPUSD,XAUUSD
 uv run python -m app analyze EURUSD                # quick single-asset read (not journaled)
@@ -299,6 +308,12 @@ opportunity stays at `WAIT` with `fundamental_setup_ready=true` and a
 `python -m app quote EURUSD` inspects a quote directly. See
 `docs/monitoring.md` section 2a.
 
+**For daily manual use**, `python -m app daily` orchestrates `weekly` +
+`monitor --all` into one consolidated review (no new scoring/decision/
+monitoring logic -- pure orchestration of the existing pipeline). See
+`docs/daily_workflow.md` for the full routine, including the known
+caveat about re-running it for a still-open idea.
+
 ## 16. How to add a new asset
 
 1. Add an `AssetDefinition` to `app/market/universe.py` (base/quote
@@ -322,7 +337,7 @@ opportunity stays at `WAIT` with `fundamental_setup_ready=true` and a
 ## 18. Testing & quality gates
 
 ```bash
-uv run pytest            # 240 tests, no real network calls (respx + fixtures)
+uv run pytest            # 250 tests, no real network calls (respx + fixtures)
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy app
