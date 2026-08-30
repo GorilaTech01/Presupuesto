@@ -323,6 +323,15 @@ def journal_skip(
             f"{opportunity.recommendation_id}[/red]"
         )
         raise typer.Exit(code=1) from None
+    # Also cancel the underlying MonitoredTradeOpportunity so a later
+    # `daily`/`weekly` run never mistakes it for a still-open thesis to
+    # continue (see app.monitor.identity) and `monitor --all` stops
+    # re-evaluating it -- CANCELLED is terminal for both.
+    service = TradeOpportunityMonitorService(settings)
+    try:
+        service.cancel_opportunity(opportunity, reason="USER_SKIPPED")
+    finally:
+        service.close()
     console.print(f"Recorded: skipped {opportunity.symbol}.")
 
 

@@ -22,7 +22,7 @@ from app.common.errors import DataSourceUnavailable, StaleDataError, SymbolNotVe
 from app.common.event_bus import DomainEvent, EventBus
 from app.common.lookahead import assert_no_lookahead
 from app.config.settings import Settings
-from app.domain.enums import FundamentalBias, JournalStatus, TradeAction, TriggerStatus
+from app.domain.enums import Direction, FundamentalBias, JournalStatus, TradeAction, TriggerStatus
 from app.domain.models import (
     CatalystEvent,
     MonitoredTradeOpportunity,
@@ -36,6 +36,7 @@ from app.market.price_provider import CurrentMarketQuote
 from app.market.price_router import build_price_provider
 from app.market.universe import AssetDefinition, get_asset
 from app.monitor import events as monitor_events
+from app.monitor.identity import OpportunityFingerprint, find_reusable_opportunity
 from app.monitor.opportunity_engine import (
     READINESS_BLOCKER_PRICE_STALE,
     READINESS_BLOCKER_PRICE_UNAVAILABLE,
@@ -94,6 +95,54 @@ def _materially_changed(
     )
 
 
+def _apply_evaluation_update(
+    opportunity: MonitoredTradeOpportunity,
+    evaluation: OpportunityEvaluation,
+    *,
+    now: datetime,
+    score: float,
+    data_cutoff: datetime,
+    catalysts: list[CatalystEvent],
+    source_snapshot: list[str],
+    direction: Direction,
+    state_changed: bool,
+) -> MonitoredTradeOpportunity:
+    """The one place a `MonitoredTradeOpportunity`'s live re-evaluation
+    fields are updated -- used identically by `refresh_one` (re-evaluating
+    an existing opportunity) and `create_opportunity`'s reuse path
+    (continuing an existing opportunity instead of creating a duplicate for
+    the same active thesis). Identity/config fields (opportunity_id,
+    recommendation_id, created_at, asset, symbol, horizon, valid_until,
+    entry_condition, fundamental_invalidation, ...) are never touched here.
+    """
+    return opportunity.model_copy(
+        update={
+            "updated_at": now if state_changed else opportunity.updated_at,
+            "fundamental_bias": evaluation.fundamental_bias,
+            "trade_action": evaluation.trade_action,
+            "direction": direction,
+            "conviction": evaluation.conviction,
+            "conviction_breakdown": evaluation.conviction_breakdown,
+            "current_score": score,
+            "data_cutoff": data_cutoff,
+            "last_evaluated_at": now,
+            "next_relevant_event": _next_relevant_event(catalysts),
+            "trigger_status": evaluation.trigger_status,
+            "readiness_reason": evaluation.readiness_reason,
+            "cancellation_reason": evaluation.cancellation_reason,
+            "fundamental_setup_ready": evaluation.fundamental_setup_ready,
+            "readiness_blocker": evaluation.readiness_blocker,
+            "catalysts": catalysts,
+            "source_snapshot": source_snapshot,
+            "decision_history": [
+                *opportunity.decision_history,
+                _history_entry(now, evaluation, score),
+            ],
+            "trade_plan": evaluation.trade_plan,
+        }
+    )
+
+
 class TradeOpportunityMonitorService:
     def __init__(self, settings: Settings, event_bus: EventBus | None = None) -> None:
         self.settings = settings
@@ -133,9 +182,21 @@ class TradeOpportunityMonitorService:
         supplied by the caller (e.g. `WeeklyPipeline`, which resolves its
         own quote); `price_blocker` is an optional, caller-diagnosed reason
         `price` is `None` (`READINESS_BLOCKER_PRICE_UNAVAILABLE`/`_STALE`) --
-        omit it and a generic PRICE_UNAVAILABLE is assumed if needed."""
+        omit it and a generic PRICE_UNAVAILABLE is assumed if needed.
+
+        Continues an existing opportunity instead of creating a duplicate
+        when one is still active for the same (asset, direction, horizon)
+        fingerprint (see `app.monitor.identity`) -- e.g. running `weekly`/
+        `daily` again while Monday's EURUSD bearish thesis is still WAIT or
+        READY_TO_TRADE updates that same opportunity_id rather than starting
+        a second, parallel one for the same idea.
+        """
         now = datetime.now(UTC)
-        valid_until = end_of_trading_week(now)
+        fingerprint = OpportunityFingerprint(
+            asset=definition.asset, direction=draft.direction, horizon=draft.time_stop
+        )
+        existing = find_reusable_opportunity(self.store.load_all(), fingerprint)
+        valid_until = existing.valid_until if existing is not None else end_of_trading_week(now)
 
         symbol_resolved = None
         with contextlib.suppress(SymbolNotVerifiable):
@@ -159,7 +220,34 @@ class TradeOpportunityMonitorService:
         )
 
         if evaluation.trade_action is TradeAction.NO_TRADE:
+            # Deliberately does not touch `existing` even if one was found:
+            # the next `refresh_all()` pass (never skips a non-CANCELLED
+            # opportunity) will apply this same downgrade on its own, so
+            # there is nothing this call needs to persist here.
             return None
+
+        if existing is not None:
+            previous_bias = existing.fundamental_bias
+            previous_action = existing.trade_action
+            previous_conviction = existing.conviction
+            state_changed = _materially_changed(existing, evaluation)
+            updated = _apply_evaluation_update(
+                existing,
+                evaluation,
+                now=now,
+                score=evaluation_score,
+                data_cutoff=data_cutoff,
+                catalysts=draft.catalysts,
+                source_snapshot=draft.sources,
+                direction=draft.direction,
+                state_changed=state_changed,
+            )
+            self.store.save(updated)
+            self._emit_transition_events(
+                updated, previous_bias, previous_action, previous_conviction, state_changed
+            )
+            self._sync_journal(updated, previous_action)
+            return updated
 
         opportunity = MonitoredTradeOpportunity(
             opportunity_id=str(uuid.uuid4()),
@@ -333,31 +421,16 @@ class TradeOpportunityMonitorService:
             (f.retrieval_timestamp for f in fetch_result.facts.values()),
             default=opportunity.data_cutoff,
         )
-        updated = opportunity.model_copy(
-            update={
-                "updated_at": now if state_changed else opportunity.updated_at,
-                "fundamental_bias": evaluation.fundamental_bias,
-                "trade_action": evaluation.trade_action,
-                "direction": draft.direction,
-                "conviction": evaluation.conviction,
-                "conviction_breakdown": evaluation.conviction_breakdown,
-                "current_score": score,
-                "data_cutoff": new_data_cutoff,
-                "last_evaluated_at": now,
-                "next_relevant_event": _next_relevant_event(draft.catalysts),
-                "trigger_status": evaluation.trigger_status,
-                "readiness_reason": evaluation.readiness_reason,
-                "cancellation_reason": evaluation.cancellation_reason,
-                "fundamental_setup_ready": evaluation.fundamental_setup_ready,
-                "readiness_blocker": evaluation.readiness_blocker,
-                "catalysts": draft.catalysts,
-                "source_snapshot": draft.sources,
-                "decision_history": [
-                    *opportunity.decision_history,
-                    _history_entry(now, evaluation, score),
-                ],
-                "trade_plan": evaluation.trade_plan,
-            }
+        updated = _apply_evaluation_update(
+            opportunity,
+            evaluation,
+            now=now,
+            score=score,
+            data_cutoff=new_data_cutoff,
+            catalysts=draft.catalysts,
+            source_snapshot=draft.sources,
+            direction=draft.direction,
+            state_changed=state_changed,
         )
         self.store.save(updated)
         self._emit_transition_events(
@@ -375,6 +448,49 @@ class TradeOpportunityMonitorService:
                 continue  # terminal state -- never re-evaluated again
             results.append(self.refresh_one(opportunity, full_refresh=full_refresh))
         return results
+
+    # -- manual cancellation (`journal skip`) --------------------------------
+
+    def cancel_opportunity(
+        self, opportunity: MonitoredTradeOpportunity, *, reason: str
+    ) -> MonitoredTradeOpportunity:
+        """Manually cancels an opportunity (e.g. `journal skip`) so it is
+        both (a) never re-evaluated again by `refresh_all` and (b) never
+        matched as "still active" by a later `create_opportunity` reuse
+        lookup (see `app.monitor.identity`) -- CANCELLED is the one
+        terminal state both paths already respect. Idempotent: cancelling
+        an already-cancelled opportunity is a no-op that returns it
+        unchanged, so calling this twice never double-appends history or
+        double-publishes an event.
+        """
+        if opportunity.trade_action is TradeAction.CANCELLED:
+            return opportunity
+        now = datetime.now(UTC)
+        updated = opportunity.model_copy(
+            update={
+                "updated_at": now,
+                "trade_action": TradeAction.CANCELLED,
+                "cancellation_reason": reason,
+                "trade_plan": None,
+                "last_evaluated_at": now,
+                "decision_history": [
+                    *opportunity.decision_history,
+                    OpportunityHistoryEntry(
+                        at=now,
+                        fundamental_bias=opportunity.fundamental_bias,
+                        trade_action=TradeAction.CANCELLED,
+                        trigger_status=opportunity.trigger_status,
+                        conviction=opportunity.conviction,
+                        score=opportunity.current_score,
+                        reason=reason,
+                    ),
+                ],
+            }
+        )
+        self.store.save(updated)
+        self._publish(monitor_events.trade_opportunity_cancelled(updated))
+        self._sync_journal(updated, opportunity.trade_action)
+        return updated
 
     def _reject_for_lookahead(
         self, opportunity: MonitoredTradeOpportunity, now: datetime, detail: str

@@ -310,9 +310,11 @@ opportunity stays at `WAIT` with `fundamental_setup_ready=true` and a
 
 **For daily manual use**, `python -m app daily` orchestrates `weekly` +
 `monitor --all` into one consolidated review (no new scoring/decision/
-monitoring logic -- pure orchestration of the existing pipeline). See
-`docs/daily_workflow.md` for the full routine, including the known
-caveat about re-running it for a still-open idea.
+monitoring logic -- pure orchestration of the existing pipeline). Safe to
+run every morning: it continues an existing active opportunity for the
+same asset/direction/horizon thesis instead of starting a duplicate one
+(see `app/monitor/identity.py` and `docs/daily_workflow.md` for the full
+routine).
 
 ## 16. How to add a new asset
 
@@ -337,7 +339,7 @@ caveat about re-running it for a still-open idea.
 ## 18. Testing & quality gates
 
 ```bash
-uv run pytest            # 250 tests, no real network calls (respx + fixtures)
+uv run pytest            # 273 tests, no real network calls (respx + fixtures)
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy app

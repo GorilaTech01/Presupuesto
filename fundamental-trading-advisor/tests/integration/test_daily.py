@@ -284,3 +284,35 @@ def test_daily_never_calls_a_second_decision_engine(monkeypatch, tmp_path: Path)
     assert result.exit_code == 0
     assert "EURUSD" in result.output
     assert "BEARISH" in result.output
+
+
+def test_second_daily_run_reuses_same_opportunity_id_for_same_active_thesis(
+    tmp_path: Path, monkeypatch
+):
+    """The exact scenario from the duplicate-opportunity fix: `daily` run
+    twice with the same still-active EURUSD thesis must update the SAME
+    monitored opportunity, never spawn a second one."""
+    _env(tmp_path, monkeypatch)
+    pending = _catalyst(actual=None)
+    _patch_weekly_draft(
+        monkeypatch,
+        _draft(
+            direction=Direction.SELL, trade_action=ExecutionReadiness.ENTER_NOW, catalysts=[pending]
+        ),
+    )
+    settings = _settings_for(tmp_path)
+
+    first_result = runner.invoke(app, ["daily"])
+    assert first_result.exit_code == 0
+
+    store = OpportunityStore(settings.data_dir / "monitor" / "opportunities.jsonl")
+    after_first = store.load_all()
+    assert len(after_first) == 1
+    first_id = after_first[0].opportunity_id
+
+    second_result = runner.invoke(app, ["daily"])
+    assert second_result.exit_code == 0
+
+    after_second = store.load_all()
+    assert len(after_second) == 1  # still exactly one -- no DEF spawned
+    assert after_second[0].opportunity_id == first_id

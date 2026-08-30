@@ -17,13 +17,13 @@ opportunity already being tracked, and prints one consolidated review. It
 is pure orchestration of `weekly` + `monitor --all` -- no new scoring or
 decision logic.
 
-**Important:** `daily` re-runs the full weekly comparison every time you
-call it. Running it once at the start of your session is the intended use.
-If you already have an open idea (`WAIT` or `READY_TO_TRADE`) you're
-tracking and just want a fresh read on it, run `python -m app monitor --all`
-instead (see "After an important catalyst" below) -- it's cheaper and
-doesn't start tracking a second, separate copy of the same idea. See
-"Known limitation" at the end of this guide.
+Safe to run every morning: if the same asset/direction/horizon thesis from
+a previous run is still active (`WAIT` or `READY_TO_TRADE`), `daily`
+**continues that same tracked opportunity** instead of starting a second,
+parallel one -- see "How re-running `daily` avoids duplicate opportunities"
+below. If you just want a lighter re-check on what's already tracked
+without a fresh 3-candidate comparison, `python -m app monitor --all` alone
+is cheaper (see "After an important catalyst" below).
 
 ## What the output means
 
@@ -83,12 +83,9 @@ sends an order -- it only writes a log line.
 uv run python -m app journal skip --opportunity-id <id>
 ```
 
-Marks the journal entry as skipped. Note: this does not stop the
-underlying opportunity from being tracked -- `monitor --all` will keep
-re-evaluating it until it naturally expires (its time stop) or is
-fundamentally invalidated (`CANCELLED`). If you don't want to see it again
-after skipping, just ignore it in future `monitor`/`daily` output; it will
-resolve to `CANCELLED` or expire on its own.
+Marks the journal entry as skipped **and** cancels the underlying
+monitored opportunity, so `monitor --all` stops re-evaluating it and a
+later `daily`/`weekly` run treats it as closed rather than continuing it.
 
 ## If it says CANCELLED
 
@@ -113,22 +110,29 @@ uv run python -m app journal
 Lists every journaled recommendation if you just want to review the raw
 log.
 
-## Known limitation: re-running `daily`/`weekly` starts a new tracked idea
+## How re-running `daily` avoids duplicate opportunities
 
-Each `daily`/`weekly` run generates a fresh recommendation and, if a
-candidate is interesting enough, a **new** monitored opportunity for it --
-it does not resume or merge into one you already have open for the same
-asset. In practice this means: if you run `daily` every single morning
-while EURUSD stays interesting for several days in a row, you can end up
-tracking several separate EURUSD opportunities instead of one continuous
-one, each independently reaching `WAIT`/`READY_TO_TRADE`/`CANCELLED` (and
-potentially alerting) on its own schedule.
+Every `daily`/`weekly` run still journals a fresh recommendation row (that
+audit trail is intentional and unchanged), but before starting a new
+*monitored opportunity* it checks whether one is already active for the
+same thesis. "Same thesis" means: same asset, same direction (BUY/SELL),
+and same horizon -- current price is never part of that check, so a moved
+market never makes an unchanged thesis look new.
 
-This is a known characteristic of the current design, not a scoring or
-threshold bug, and it has not been changed as part of this close-out (that
-would be a methodology change outside today's scope). The practical
-workaround: use `daily` to check for genuinely new setups (e.g. once at the
-start of your trading week, or when you suspect the picture has changed),
-and use `python -m app monitor --all` for routine day-to-day re-checks of
-what you're already tracking -- it only ever refreshes existing
-opportunities and never creates new ones.
+- **Still active** (`WAIT` or `READY_TO_TRADE`) and same asset/direction/
+  horizon -> the existing opportunity is updated in place (score,
+  conviction, catalysts, data cutoff, history) -- same `opportunity_id` as
+  before, no duplicate.
+- **Cancelled, expired, or skipped** (`journal skip` now cancels the
+  underlying opportunity, not just the journal row) -> never reused; a
+  fresh candidate for that asset starts a genuinely new opportunity.
+- **Opposite direction, or a different horizon** -> always a new
+  opportunity, even for the same asset -- that is a different thesis, not
+  a continuation.
+
+Nothing about scoring, thresholds, conviction, catalysts, trigger logic,
+price policy, or the WAIT/READY_TO_TRADE/CANCELLED state machine changed to
+make this work -- it's purely a lookup before persistence. See
+`app/monitor/identity.py` for the exact fingerprint and
+`tests/integration/test_opportunity_reuse.py` for the full set of reuse/
+new-opportunity scenarios this is tested against.

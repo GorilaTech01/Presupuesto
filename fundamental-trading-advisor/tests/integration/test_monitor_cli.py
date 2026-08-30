@@ -190,6 +190,54 @@ def test_journal_enter_records_manual_entry_never_sends_an_order(tmp_path: Path,
     assert updated.entry_price_actual_or_simulated == 1.1005
 
 
+def test_journal_skip_cancels_the_underlying_monitored_opportunity(tmp_path: Path, monkeypatch):
+    """Duplicate-opportunity fix: a skipped opportunity must become
+    CANCELLED so a later `daily`/`weekly` run never mistakes it for a
+    still-open thesis to continue (app.monitor.identity), and `monitor
+    --all` stops re-evaluating it."""
+    _env(tmp_path, monkeypatch)
+    settings = _settings_for(tmp_path)
+    _seed_opportunity(settings, ready=False)
+
+    from app.journal.journal import RecommendationJournal
+    from app.journal.models import JournalEntry
+
+    journal = RecommendationJournal(settings.journal_dir / "journal.jsonl")
+    journal.add(
+        JournalEntry(
+            recommendation_id="rec-cli-1",
+            generated_at=datetime.now(UTC),
+            data_cutoff=datetime.now(UTC),
+            asset="EURUSD",
+            symbol="EURUSD",
+            direction=Direction.SELL,
+            conviction=70,
+            entry_condition="test",
+            recommended_entry=None,
+            stop_loss=None,
+            take_profit=None,
+            risk_reward=None,
+            time_stop="Friday close",
+            fundamental_thesis="test",
+            drivers=[],
+            catalysts=[],
+            invalidation="n/a",
+            sources=[],
+        )
+    )
+
+    result = runner.invoke(app, ["journal", "skip", "--opportunity-id", "opp-cli-1"])
+    assert result.exit_code == 0
+    assert "Recorded: skipped" in result.output
+
+    store = OpportunityStore(settings.data_dir / "monitor" / "opportunities.jsonl")
+    updated = store.get("opp-cli-1")
+    assert updated is not None
+    assert updated.trade_action is TradeAction.CANCELLED
+    assert updated.cancellation_reason == "USER_SKIPPED"
+    assert updated.trade_plan is None
+
+
 def test_quote_command_reports_price_unavailable_with_no_provider_configured(
     tmp_path: Path, monkeypatch
 ):
