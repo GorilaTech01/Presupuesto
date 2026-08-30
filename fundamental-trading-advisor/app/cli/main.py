@@ -30,9 +30,14 @@ from app.common.event_bus import DomainEvent
 from app.common.logging import configure_logging
 from app.common.time_utils import format_utc
 from app.config.settings import get_settings
-from app.domain.enums import JournalStatus
 from app.fundamental.candidate import evaluate_candidate, indicators_for_asset
 from app.fundamental.decision import FundamentalDecisionEngine
+from app.journal.actions import (
+    JournalEntryNotLinked,
+    OpportunityNotFound,
+    record_manual_entry,
+    record_skip,
+)
 from app.journal.benchmark import export_benchmark_csv, export_benchmark_jsonl
 from app.journal.journal import RecommendationJournal
 from app.journal.metrics import compute_performance
@@ -46,6 +51,7 @@ from app.reporting.human_report import render_human_report
 from app.reporting.json_report import to_machine_readable
 from app.reporting.monitor_report import render_monitor_report
 from app.reporting.monitor_report import to_machine_readable as monitor_to_machine_readable
+from app.services.daily import run_daily_analysis
 from app.services.weekly_pipeline import WeeklyPipeline
 from app.sources.repository import FundamentalDataRepository
 
@@ -73,44 +79,24 @@ def daily(
     configure_logging()
     settings = get_settings()
     symbols = [s.strip().upper() for s in candidates.split(",") if s.strip()]
-    pipeline = WeeklyPipeline(settings)
-    try:
-        comparison = pipeline.run(symbols)
-        results = pipeline.monitor_service.refresh_all()
-    finally:
-        pipeline.close()
+    result = run_daily_analysis(settings, symbols)
 
-    # Look today's opportunity up from the store directly, not just from
-    # `results`: refresh_all() correctly skips CANCELLED opportunities
-    # (terminal state, never re-evaluated again), so a same-day creation
-    # that was immediately cancelled by a contradicting catalyst would
-    # otherwise never be found here even though it IS today's outcome.
-    all_opportunities = pipeline.monitor_service.store.load_all()
-    todays_opportunity = next(
-        (o for o in all_opportunities if o.recommendation_id == pipeline.last_recommendation_id),
-        None,
+    console.print(
+        render_daily_review(result.comparison, result.todays_opportunity, settings.timezone)
     )
-    others = [
-        opportunity
-        for opportunity, _state_changed in results
-        if todays_opportunity is None
-        or opportunity.opportunity_id != todays_opportunity.opportunity_id
-    ]
-
-    console.print(render_daily_review(comparison, todays_opportunity, settings.timezone))
-    other_text = render_other_opportunities(others, settings.timezone)
+    other_text = render_other_opportunities(result.other_opportunities, settings.timezone)
     if other_text:
         console.print(other_text)
 
     payload = {
-        "weekly": to_machine_readable(comparison),
+        "weekly": to_machine_readable(result.comparison),
         "todays_opportunity": (
-            monitor_to_machine_readable(todays_opportunity, state_changed=False)
-            if todays_opportunity is not None
+            monitor_to_machine_readable(result.todays_opportunity, state_changed=False)
+            if result.todays_opportunity is not None
             else None
         ),
         "other_opportunities": [
-            monitor_to_machine_readable(o, state_changed=False) for o in others
+            monitor_to_machine_readable(o, state_changed=False) for o in result.other_opportunities
         ],
     }
     payload_json = json.dumps(payload, indent=2, default=str)
@@ -270,29 +256,24 @@ def journal_enter(
     settings = get_settings()
     store = OpportunityStore(settings.data_dir / "monitor" / "opportunities.jsonl")
     opportunity = store.get(opportunity_id)
-    if opportunity is None:
-        console.print(f"[red]No monitored opportunity with id {opportunity_id}[/red]")
-        raise typer.Exit(code=1)
-    if opportunity.trade_action.value != "READY_TO_TRADE":
+    if opportunity is not None and opportunity.trade_action.value != "READY_TO_TRADE":
         console.print(
             f"[yellow]Warning: trade_action is {opportunity.trade_action.value}, "
             "not READY_TO_TRADE. Recording anyway -- this is your call.[/yellow]"
         )
-    journal = RecommendationJournal(settings.journal_dir / "journal.jsonl")
     try:
-        journal.update(
-            opportunity.recommendation_id,
-            status=JournalStatus.ACTIVE_SIMULATION,
-            entry_price_actual_or_simulated=price,
-        )
-    except KeyError:
+        record_manual_entry(settings, opportunity_id=opportunity_id, price=price)
+    except OpportunityNotFound:
+        console.print(f"[red]No monitored opportunity with id {opportunity_id}[/red]")
+        raise typer.Exit(code=1) from None
+    except JournalEntryNotLinked as exc:
         console.print(
-            "[red]No journal entry linked to recommendation_id "
-            f"{opportunity.recommendation_id}[/red]"
+            f"[red]No journal entry linked to recommendation_id {exc.recommendation_id}[/red]"
         )
         raise typer.Exit(code=1) from None
+    symbol = opportunity.symbol if opportunity is not None else opportunity_id
     console.print(
-        f"Recorded manual entry for {opportunity.symbol} at {price}. "
+        f"Recorded manual entry for {symbol} at {price}. "
         "No order was sent -- this only logs that you executed manually in MT5."
     )
 
@@ -307,32 +288,18 @@ def journal_skip(
     settings = get_settings()
     store = OpportunityStore(settings.data_dir / "monitor" / "opportunities.jsonl")
     opportunity = store.get(opportunity_id)
-    if opportunity is None:
-        console.print(f"[red]No monitored opportunity with id {opportunity_id}[/red]")
-        raise typer.Exit(code=1)
-    journal = RecommendationJournal(settings.journal_dir / "journal.jsonl")
     try:
-        journal.update(
-            opportunity.recommendation_id,
-            status=JournalStatus.CANCELLED,
-            exit_reason="USER_SKIPPED",
-        )
-    except KeyError:
+        record_skip(settings, opportunity_id=opportunity_id)
+    except OpportunityNotFound:
+        console.print(f"[red]No monitored opportunity with id {opportunity_id}[/red]")
+        raise typer.Exit(code=1) from None
+    except JournalEntryNotLinked as exc:
         console.print(
-            "[red]No journal entry linked to recommendation_id "
-            f"{opportunity.recommendation_id}[/red]"
+            f"[red]No journal entry linked to recommendation_id {exc.recommendation_id}[/red]"
         )
         raise typer.Exit(code=1) from None
-    # Also cancel the underlying MonitoredTradeOpportunity so a later
-    # `daily`/`weekly` run never mistakes it for a still-open thesis to
-    # continue (see app.monitor.identity) and `monitor --all` stops
-    # re-evaluating it -- CANCELLED is terminal for both.
-    service = TradeOpportunityMonitorService(settings)
-    try:
-        service.cancel_opportunity(opportunity, reason="USER_SKIPPED")
-    finally:
-        service.close()
-    console.print(f"Recorded: skipped {opportunity.symbol}.")
+    symbol = opportunity.symbol if opportunity is not None else opportunity_id
+    console.print(f"Recorded: skipped {symbol}.")
 
 
 app.add_typer(journal_app, name="journal")
@@ -457,6 +424,15 @@ def evaluate(
     if export_jsonl:
         export_benchmark_jsonl(entries, export_jsonl)
         console.print(f"benchmark.jsonl written to {export_jsonl}")
+
+
+@app.command()
+def desktop() -> None:
+    """Launch the desktop control panel (PySide6 GUI). Same engine, no
+    autoexecution -- see docs/desktop_app.md."""
+    from app.desktop.app import run
+
+    raise typer.Exit(code=run())
 
 
 def main() -> None:

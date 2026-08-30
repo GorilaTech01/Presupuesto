@@ -66,6 +66,17 @@ class MT5ReadOnlyPriceProvider:
     def __init__(self, *, mt5_module: _Mt5Module | None = None) -> None:
         self._mt5 = mt5_module if mt5_module is not None else _try_import_mt5()
 
+    def is_terminal_available(self) -> bool:
+        """A lightweight, read-only probe (`initialize`/`shutdown` only, no
+        symbol needed) for status displays (e.g. the desktop app's System
+        Status screen) -- never used for any trading decision."""
+        if self._mt5 is None:
+            return False
+        if not self._mt5.initialize():
+            return False
+        self._mt5.shutdown()
+        return True
+
     def get_quote(self, symbol: str) -> CurrentMarketQuote:
         if self._mt5 is None:
             raise DataSourceUnavailable(

@@ -20,6 +20,19 @@ decide, execute in Pepperstone/MT5 yourself), see
 `python -m app daily` each morning, `python -m app monitor --all` whenever
 you want to re-check what's already being tracked.
 
+## Desktop App
+
+A local PySide6 GUI control panel is also available as a presentation
+layer over this same engine (no autoexecution, no new scoring logic):
+
+```bash
+uv run python -m app desktop
+```
+
+On Windows you can also double-click `run_desktop.bat`. See
+**[`docs/desktop_app.md`](docs/desktop_app.md)** for the full screen-by-
+screen guide.
+
 ## 1. Objective
 
 Given the current macro backdrop (monetary policy, inflation, employment,
@@ -339,10 +352,10 @@ routine).
 ## 18. Testing & quality gates
 
 ```bash
-uv run pytest            # 273 tests, no real network calls (respx + fixtures)
+uv run pytest            # 313 tests, no real network calls (respx + fixtures)
 uv run ruff check .
 uv run ruff format --check .
-uv run mypy app
+uv run mypy app --strict
 git diff --check
 ```
 
@@ -394,6 +407,10 @@ historical demonstration, not a live command.
   external alert channel wired up (console + local JSON file only) and no
   built-in scheduler -- `python -m app monitor` must be triggered
   externally (cron, systemd timer, or similar) for periodic checks.
+- The desktop app (`docs/desktop_app.md`) does not show Risk Amount /
+  Position Size on the READY_TO_TRADE card: that math is computed
+  transiently at decision time and not currently persisted onto the
+  stored trade plan.
 
 ## 21. Next steps (recommended)
 

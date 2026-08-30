@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import os
 
-import pytest
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from datetime import UTC, datetime  # noqa: E402
+
+import pytest  # noqa: E402
 
 from app.domain.enums import Freshness, ObservationKind
 from app.domain.models import FactObservation

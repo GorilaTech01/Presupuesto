@@ -12,6 +12,7 @@ dependencies = [
     "pyyaml>=6.0",
     "typer>=0.13",
     "anthropic>=0.40",
+    "pyside6>=6.11.2",
 ]
 
 [project.scripts]
@@ -25,6 +26,7 @@ dev = [
     "mypy>=1.13",
     "types-PyYAML>=6.0",
     "respx>=0.21",
+    "pytest-qt>=4.5.0",
 ]
 
 [build-system]
