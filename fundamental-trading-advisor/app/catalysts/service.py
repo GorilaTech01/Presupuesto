@@ -79,6 +79,23 @@ _HAWKISH_ABOVE_CONSENSUS = {
 _HAWKISH_BELOW_CONSENSUS = {"us_initial_claims"}
 
 
+def hawkish_direction_for_indicator(indicator: str) -> str | None:
+    """Returns "above" if a print above consensus is the hawkish/currency-
+    supportive surprise for this indicator, "below" if a print below
+    consensus is, or None if this indicator has no documented directionality
+    (e.g. a central bank rate decision, which isn't a consensus-vs-actual
+    surprise in the same sense). Shared with `app.monitor.trigger_evaluator`
+    so the monitoring layer's confirm/contradict logic uses the exact same
+    table this module already uses for `favors_thesis_if` text, rather than
+    a second, potentially-diverging copy.
+    """
+    if indicator in _HAWKISH_ABOVE_CONSENSUS:
+        return "above"
+    if indicator in _HAWKISH_BELOW_CONSENSUS:
+        return "below"
+    return None
+
+
 @dataclass
 class _RawEvent:
     indicator: str

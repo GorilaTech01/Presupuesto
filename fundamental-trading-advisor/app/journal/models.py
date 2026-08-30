@@ -33,6 +33,11 @@ class JournalEntry(BaseModel):
     sources: list[str]
     status: JournalStatus = JournalStatus.PROPOSED
 
+    # Set by TradeOpportunityMonitorService (V1.1) the moment a monitored
+    # opportunity linked to this recommendation transitions WAIT -> READY_TO_TRADE.
+    # Reaching READY_TO_TRADE is NOT the same as execution -- see `journal enter`.
+    ready_to_trade_at: datetime | None = None
+
     # Filled in later by the (decoupled) paper-trade evaluator / manual update:
     entry_price_actual_or_simulated: float | None = None
     exit_price: float | None = None

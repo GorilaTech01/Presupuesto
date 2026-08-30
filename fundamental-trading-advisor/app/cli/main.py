@@ -1,10 +1,13 @@
-"""CLI entry point (section 25).
+"""CLI entry point (section 25; monitoring commands added in V1.1).
 
 python -m app analyze SYMBOL   # quick single-asset fundamental read
 python -m app weekly           # full 3-candidate weekly pipeline
 python -m app report           # re-render the latest recommendation
 python -m app journal          # list journal entries
+python -m app journal enter --opportunity-id <id> --price <price>  # record a manual entry
+python -m app journal skip --opportunity-id <id>                   # record a manual skip
 python -m app evaluate         # paper-trading performance + benchmark export
+python -m app monitor          # one fundamental re-evaluation pass over monitored opportunities
 """
 
 from __future__ import annotations
@@ -17,16 +20,23 @@ from rich.console import Console
 from rich.table import Table
 
 from app.catalysts.service import CatalystService, annotate_thesis_impact
+from app.common.event_bus import DomainEvent
 from app.common.logging import configure_logging
 from app.config.settings import get_settings
+from app.domain.enums import JournalStatus
 from app.fundamental.candidate import evaluate_candidate, indicators_for_asset
 from app.fundamental.decision import FundamentalDecisionEngine
 from app.journal.benchmark import export_benchmark_csv, export_benchmark_jsonl
 from app.journal.journal import RecommendationJournal
 from app.journal.metrics import compute_performance
 from app.market.universe import get_asset
+from app.monitor.alerts import AlertPolicy, ConsoleAlertSink
+from app.monitor.service import TradeOpportunityMonitorService
+from app.monitor.store import OpportunityStore
 from app.reporting.human_report import render_human_report
 from app.reporting.json_report import to_machine_readable
+from app.reporting.monitor_report import render_monitor_report
+from app.reporting.monitor_report import to_machine_readable as monitor_to_machine_readable
 from app.services.weekly_pipeline import WeeklyPipeline
 from app.sources.repository import FundamentalDataRepository
 
@@ -136,9 +146,12 @@ def report(
     console.print_json(entry.model_dump_json())
 
 
-@app.command(name="journal")
-def journal_cmd() -> None:
-    """List all journaled recommendations."""
+journal_app = typer.Typer(
+    add_completion=False, help="List journaled recommendations, or record a manual decision."
+)
+
+
+def _print_journal_table() -> None:
     settings = get_settings()
     journal = RecommendationJournal(settings.journal_dir / "journal.jsonl")
     entries = journal.load_all()
@@ -155,6 +168,153 @@ def journal_cmd() -> None:
             e.status.value,
         )
     console.print(table)
+
+
+@journal_app.callback(invoke_without_command=True)
+def journal_default(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _print_journal_table()
+
+
+@journal_app.command(name="list")
+def journal_list() -> None:
+    """List all journaled recommendations."""
+    _print_journal_table()
+
+
+@journal_app.command(name="enter")
+def journal_enter(
+    opportunity_id: str = typer.Option(
+        ..., "--opportunity-id", help="MonitoredTradeOpportunity id."
+    ),
+    price: float = typer.Option(..., "--price", help="Price at which YOU manually entered in MT5."),
+) -> None:
+    """Record that you manually entered this trade in MT5. Never sends an order."""
+    settings = get_settings()
+    store = OpportunityStore(settings.data_dir / "monitor" / "opportunities.jsonl")
+    opportunity = store.get(opportunity_id)
+    if opportunity is None:
+        console.print(f"[red]No monitored opportunity with id {opportunity_id}[/red]")
+        raise typer.Exit(code=1)
+    if opportunity.trade_action.value != "READY_TO_TRADE":
+        console.print(
+            f"[yellow]Warning: trade_action is {opportunity.trade_action.value}, "
+            "not READY_TO_TRADE. Recording anyway -- this is your call.[/yellow]"
+        )
+    journal = RecommendationJournal(settings.journal_dir / "journal.jsonl")
+    try:
+        journal.update(
+            opportunity.recommendation_id,
+            status=JournalStatus.ACTIVE_SIMULATION,
+            entry_price_actual_or_simulated=price,
+        )
+    except KeyError:
+        console.print(
+            "[red]No journal entry linked to recommendation_id "
+            f"{opportunity.recommendation_id}[/red]"
+        )
+        raise typer.Exit(code=1) from None
+    console.print(
+        f"Recorded manual entry for {opportunity.symbol} at {price}. "
+        "No order was sent -- this only logs that you executed manually in MT5."
+    )
+
+
+@journal_app.command(name="skip")
+def journal_skip(
+    opportunity_id: str = typer.Option(
+        ..., "--opportunity-id", help="MonitoredTradeOpportunity id."
+    ),
+) -> None:
+    """Record that you decided NOT to take this opportunity."""
+    settings = get_settings()
+    store = OpportunityStore(settings.data_dir / "monitor" / "opportunities.jsonl")
+    opportunity = store.get(opportunity_id)
+    if opportunity is None:
+        console.print(f"[red]No monitored opportunity with id {opportunity_id}[/red]")
+        raise typer.Exit(code=1)
+    journal = RecommendationJournal(settings.journal_dir / "journal.jsonl")
+    try:
+        journal.update(
+            opportunity.recommendation_id,
+            status=JournalStatus.CANCELLED,
+            exit_reason="USER_SKIPPED",
+        )
+    except KeyError:
+        console.print(
+            "[red]No journal entry linked to recommendation_id "
+            f"{opportunity.recommendation_id}[/red]"
+        )
+        raise typer.Exit(code=1) from None
+    console.print(f"Recorded: skipped {opportunity.symbol}.")
+
+
+app.add_typer(journal_app, name="journal")
+
+
+@app.command()
+def monitor(
+    opportunity_id: str | None = typer.Option(
+        None, "--opportunity-id", help="Re-evaluate only this opportunity."
+    ),
+    all_opportunities: bool = typer.Option(
+        False, "--all", help="Re-evaluate every active opportunity (default when no id is given)."
+    ),
+    full_refresh: bool = typer.Option(
+        False, "--full-refresh", help="Bypass the source cache and force a real re-fetch."
+    ),
+    json_out: Path | None = typer.Option(
+        None, "--json-out", help="Write machine-readable JSON to this path."
+    ),
+) -> None:
+    """Run ONE fundamental re-evaluation pass over monitored opportunities, then exit.
+
+    This is not a daemon and never loops -- schedule it externally (cron,
+    Claude/Cowork, systemd timer, ...) if you want periodic checks.
+    """
+    # refresh_all is also the default behavior with no --opportunity-id
+    del all_opportunities
+    configure_logging()
+    settings = get_settings()
+    service = TradeOpportunityMonitorService(settings)
+    alert_policy = AlertPolicy(ConsoleAlertSink())
+
+    def _on_event(event: DomainEvent) -> None:
+        alert_policy.handle(event)
+
+    service.event_bus.subscribe(_on_event)
+    try:
+        if opportunity_id:
+            opportunity = service.store.get(opportunity_id)
+            if opportunity is None:
+                console.print(f"[red]No monitored opportunity with id {opportunity_id}[/red]")
+                raise typer.Exit(code=1)
+            results = [service.refresh_one(opportunity, full_refresh=full_refresh)]
+        else:
+            results = service.refresh_all(full_refresh=full_refresh)
+
+        if not results:
+            console.print("[dim]No active monitored opportunities.[/dim]")
+            return
+
+        payloads = []
+        for opportunity, state_changed in results:
+            console.print(
+                render_monitor_report(opportunity, settings.timezone, state_changed=state_changed)
+            )
+            console.print("")
+            payloads.append(monitor_to_machine_readable(opportunity, state_changed=state_changed))
+
+        payload_json = json.dumps(payloads, indent=2, default=str)
+        if json_out is not None:
+            json_out.parent.mkdir(parents=True, exist_ok=True)
+            json_out.write_text(payload_json)
+            console.print(f"[dim]Machine-readable JSON written to {json_out}[/dim]")
+        else:
+            console.print("--- JSON ---")
+            console.print(payload_json)
+    finally:
+        service.close()
 
 
 @app.command()

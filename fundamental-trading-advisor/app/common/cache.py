@@ -64,3 +64,18 @@ class DiskCache:
         except (json.JSONDecodeError, OSError):
             return None
         return str(raw.get("retrieved_at"))
+
+    def clear_all(self) -> None:
+        """Wipes every cached entry across every namespace.
+
+        Used by `--full-refresh` (monitor CLI, spec section 10) to force a
+        real re-fetch instead of relying on each source's normal TTL.
+        Incremental re-evaluation should never call this -- it relies on
+        each indicator's own TTL to naturally pick up newly-published data
+        around its release cadence without hammering official APIs.
+        """
+        import shutil
+
+        if self.root.exists():
+            shutil.rmtree(self.root)
+        self.root.mkdir(parents=True, exist_ok=True)

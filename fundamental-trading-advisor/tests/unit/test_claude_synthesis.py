@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from app.domain.enums import AssetClass, Direction, TradeAction
+from app.domain.enums import AssetClass, Direction, ExecutionReadiness
 from app.domain.models import FundamentalDecision
 from app.llm.claude_synthesis import ClaudeSynthesisClient
 
@@ -12,7 +12,7 @@ def _no_trade_decision() -> FundamentalDecision:
         symbol="EURUSD",
         asset_class=AssetClass.FX,
         direction=Direction.NO_TRADE,
-        trade_action=TradeAction.NONE,
+        trade_action=ExecutionReadiness.NONE,
         conviction=0,
         horizon="N/A",
         thesis="t",

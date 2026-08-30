@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from app.domain.enums import CatalystSeverity, Direction, Freshness, TradeAction
+from app.domain.enums import CatalystSeverity, Direction, ExecutionReadiness, Freshness
 from app.domain.models import CatalystEvent, ConvictionBreakdown, DriverScore, FundamentalScore
 
 MIN_BIAS_FOR_TRADE = 0.6
@@ -54,7 +54,7 @@ EXPECTATIONS_INCOMPLETE_PENALTY = 8
 class DecisionDraft:
     symbol: str
     direction: Direction
-    trade_action: TradeAction
+    trade_action: ExecutionReadiness
     conviction: int
     thesis: str
     top_drivers: list[DriverScore]
@@ -91,12 +91,12 @@ def _top_drivers(*scores: FundamentalScore, n: int = 4) -> list[DriverScore]:
     return all_drivers[:n]
 
 
-def _trade_action(direction: Direction, catalysts: list[CatalystEvent]) -> TradeAction:
+def _trade_action(direction: Direction, catalysts: list[CatalystEvent]) -> ExecutionReadiness:
     if direction is Direction.NO_TRADE:
-        return TradeAction.NONE
+        return ExecutionReadiness.NONE
     if _has_critical_unresolved_catalyst(catalysts) is not None:
-        return TradeAction.WAIT_FOR_TRIGGER
-    return TradeAction.ENTER_NOW
+        return ExecutionReadiness.WAIT_FOR_TRIGGER
+    return ExecutionReadiness.ENTER_NOW
 
 
 def _fx_contradiction_penalty(
@@ -216,7 +216,7 @@ class FundamentalDecisionEngine:
             return DecisionDraft(
                 symbol=symbol,
                 direction=Direction.NO_TRADE,
-                trade_action=TradeAction.NONE,
+                trade_action=ExecutionReadiness.NONE,
                 conviction=0,
                 thesis=(
                     f"NO_TRADE on {symbol}: {blocking} "
@@ -329,7 +329,7 @@ class FundamentalDecisionEngine:
             return DecisionDraft(
                 symbol=symbol,
                 direction=Direction.NO_TRADE,
-                trade_action=TradeAction.NONE,
+                trade_action=ExecutionReadiness.NONE,
                 conviction=0,
                 thesis=f"NO_TRADE on {symbol}: {blocking} (score={score.total:+.2f}).",
                 top_drivers=_top_drivers(score),

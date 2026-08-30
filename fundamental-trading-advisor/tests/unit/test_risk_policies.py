@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from app.domain.enums import AssetClass, Direction, TradeAction
+from app.domain.enums import AssetClass, Direction, ExecutionReadiness
 from app.domain.models import FundamentalDecision, TradePlan
 from app.risk.policies import (
     FundamentalInvalidationPolicy,
@@ -38,7 +38,7 @@ def _buy_decision(*, invalidation: str, time_stop: str) -> FundamentalDecision:
         symbol="EURUSD",
         asset_class=AssetClass.FX,
         direction=Direction.BUY,
-        trade_action=TradeAction.ENTER_NOW,
+        trade_action=ExecutionReadiness.ENTER_NOW,
         conviction=70,
         horizon="1w",
         thesis="t",
@@ -83,7 +83,7 @@ def test_no_trade_decision_has_no_price_stop_but_still_has_the_other_two():
         symbol="EURUSD",
         asset_class=AssetClass.FX,
         direction=Direction.NO_TRADE,
-        trade_action=TradeAction.NONE,
+        trade_action=ExecutionReadiness.NONE,
         conviction=0,
         horizon="N/A",
         thesis="t",

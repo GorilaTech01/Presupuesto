@@ -34,7 +34,7 @@ class AssetClass(StrEnum):
 
 class Direction(StrEnum):
     """The fundamental bias/call. NOT, by itself, a statement that a
-    position should be entered right now -- see `TradeAction`.
+    position should be entered right now -- see `ExecutionReadiness`.
     """
 
     BUY = "BUY"
@@ -42,7 +42,7 @@ class Direction(StrEnum):
     NO_TRADE = "NO_TRADE"
 
 
-class TradeAction(StrEnum):
+class ExecutionReadiness(StrEnum):
     """Whether a `Direction` bias is currently executable.
 
     Added after the pre-push audit (docs/decision_audit_eurusd_2026-08-31.md,
@@ -98,3 +98,45 @@ class DataSourceTier(StrEnum):
     PRIMARY_OFFICIAL = "PRIMARY_OFFICIAL"
     CONTEXT_CONSENSUS = "CONTEXT_CONSENSUS"
     NEWS_RESEARCH = "NEWS_RESEARCH"
+
+
+class FundamentalBias(StrEnum):
+    """The directional lean of a *monitored* opportunity (V1.1 monitoring
+    layer, docs/monitoring.md). Distinct from `Direction`: `Direction` is
+    the one-shot weekly call (BUY/SELL/NO_TRADE); `FundamentalBias` is a
+    monitored opportunity's current directional read, which can exist
+    (BULLISH/BEARISH) even while `TradeAction` is still WAIT.
+    """
+
+    BULLISH = "BULLISH"
+    BEARISH = "BEARISH"
+    NEUTRAL = "NEUTRAL"
+
+
+class TradeAction(StrEnum):
+    """The *operational* status of a monitored opportunity over time.
+
+    Never conflate this with `FundamentalBias`: a BEARISH bias can sit at
+    WAIT for weeks while a catalyst is pending. BUY/SELL is not a
+    `TradeAction` value -- the executable direction, once READY_TO_TRADE,
+    comes from the opportunity's `Direction` (via its trade plan), not from
+    this enum. This is unrelated to `ExecutionReadiness`, which is a
+    single-run (weekly) concept; this one is a persisted opportunity's
+    lifecycle state.
+    """
+
+    WAIT = "WAIT"
+    READY_TO_TRADE = "READY_TO_TRADE"
+    NO_TRADE = "NO_TRADE"
+    CANCELLED = "CANCELLED"
+
+
+class TriggerStatus(StrEnum):
+    """Whether the fundamental catalysts required by an opportunity's
+    thesis have resolved, per `FundamentalTriggerEvaluator`."""
+
+    PENDING = "PENDING"
+    PARTIALLY_CONFIRMED = "PARTIALLY_CONFIRMED"
+    CONFIRMED = "CONFIRMED"
+    FAILED = "FAILED"
+    EXPIRED = "EXPIRED"

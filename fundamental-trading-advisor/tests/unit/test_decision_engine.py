@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from app.domain.enums import CatalystSeverity, Direction, DriverCategory, Freshness, TradeAction
+from app.domain.enums import (
+    CatalystSeverity,
+    Direction,
+    DriverCategory,
+    ExecutionReadiness,
+    Freshness,
+)
 from app.domain.models import CatalystEvent, DriverScore, FundamentalScore
 from app.fundamental.decision import FundamentalDecisionEngine
 
@@ -171,7 +177,7 @@ def test_conditional_post_event_entry_when_critical_catalyst_has_consensus():
     # audit section 7: BUY must not be read as "enter now" while a CRITICAL
     # catalyst is still pending -- fundamental_bias (direction) and
     # trade_action are distinct.
-    assert draft.trade_action is TradeAction.WAIT_FOR_TRIGGER
+    assert draft.trade_action is ExecutionReadiness.WAIT_FOR_TRIGGER
 
 
 def test_enter_now_when_no_pending_critical_catalyst():
@@ -189,7 +195,7 @@ def test_enter_now_when_no_pending_critical_catalyst():
         facts_freshness=[Freshness.FRESH],
     )
     assert draft.direction is Direction.BUY
-    assert draft.trade_action is TradeAction.ENTER_NOW
+    assert draft.trade_action is ExecutionReadiness.ENTER_NOW
 
 
 def test_no_trade_has_none_trade_action_and_no_conviction_breakdown():
@@ -206,7 +212,7 @@ def test_no_trade_has_none_trade_action_and_no_conviction_breakdown():
         catalysts=[],
         facts_freshness=[Freshness.FRESH],
     )
-    assert draft.trade_action is TradeAction.NONE
+    assert draft.trade_action is ExecutionReadiness.NONE
     assert draft.conviction_breakdown is None
 
 

@@ -12,37 +12,47 @@ every other module stays single-purpose and independently testable.
 from __future__ import annotations
 
 import contextlib
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from app.broker.symbol_resolver import BrokerSymbolResolver
-from app.catalysts.service import CatalystService, annotate_thesis_impact
+from app.catalysts.service import CatalystService
 from app.common.errors import DataSourceUnavailable, SymbolNotVerifiable
+from app.common.logging import get_logger, log_event
 from app.common.time_utils import format_local
 from app.config.settings import Settings
-from app.domain.enums import AssetClass, Direction, Freshness, TradeAction
+from app.domain.enums import AssetClass, Direction, ExecutionReadiness, Freshness
 from app.domain.models import (
     CandidateAssessment,
     FundamentalDecision,
     TradePlan,
     WeeklyComparison,
 )
-from app.fundamental.candidate import CandidateEvaluation, evaluate_candidate, indicators_for_asset
+from app.fundamental.candidate import (
+    CandidateEvaluation,
+    build_decision_draft,
+    indicators_for_asset,
+)
 from app.fundamental.decision import DecisionDraft, FundamentalDecisionEngine
 from app.journal.journal import RecommendationJournal
 from app.journal.models import JournalEntry
 from app.market.price_provider import ManualPriceFileProvider, PriceQuote
 from app.market.universe import AssetDefinition, get_asset
+from app.monitor.service import TradeOpportunityMonitorService
 from app.risk.trade_math import build_trade_math
 from app.sources.repository import FetchResult, FundamentalDataRepository
 
 DEFAULT_CANDIDATES = ["EURUSD", "XAUUSD", "BTCUSD"]
+
+logger = get_logger("services.weekly_pipeline")
 
 
 @dataclass
 class _CandidateBundle:
     evaluation: CandidateEvaluation
     draft: DecisionDraft
+    favored_country: str
     price: PriceQuote | None
     price_error: str | None
 
@@ -58,9 +68,15 @@ class WeeklyPipeline:
         self.symbol_resolver = BrokerSymbolResolver()
         self.price_provider = ManualPriceFileProvider(settings.data_dir / "manual_prices.json")
         self.journal = RecommendationJournal(settings.journal_dir / "journal.jsonl")
+        # V1.1: keeps the strongest candidate under fundamental observation
+        # after this run (docs/monitoring.md). Uses the exact same scoring/
+        # decision sequence as this pipeline -- see app.fundamental.candidate
+        # .build_decision_draft and app.monitor.opportunity_engine.
+        self.monitor_service = TradeOpportunityMonitorService(settings)
 
     def close(self) -> None:
         self.repository.close()
+        self.monitor_service.close()
 
     def run(self, candidate_symbols: list[str] | None = None) -> WeeklyComparison:
         candidate_symbols = candidate_symbols or DEFAULT_CANDIDATES
@@ -107,7 +123,9 @@ class WeeklyPipeline:
                 incomplete_reason=None,
             )
 
-        self._journal_entry(comparison)
+        recommendation_id = str(uuid.uuid4())
+        self._journal_entry(comparison, recommendation_id)
+        self._create_monitored_opportunity(bundles, comparison, recommendation_id)
         return comparison
 
     # -- per-candidate evaluation -------------------------------------------------
@@ -115,48 +133,13 @@ class WeeklyPipeline:
     def _evaluate_one(
         self, definition: AssetDefinition, fetch_result: FetchResult
     ) -> _CandidateBundle:
-        evaluation = evaluate_candidate(definition, fetch_result)
-        needed = indicators_for_asset(definition)
-        calendar = self.catalyst_service.build_calendar(
-            needed, timezone_name=self.settings.timezone, facts=fetch_result.facts
+        draft, evaluation, favored_country = build_decision_draft(
+            definition,
+            fetch_result,
+            catalyst_service=self.catalyst_service,
+            decision_engine=self.decision_engine,
+            timezone_name=self.settings.timezone,
         )
-        facts_freshness = [
-            fetch_result.facts[i].freshness for i in needed if i in fetch_result.facts
-        ] or [Freshness.UNKNOWN]
-
-        if evaluation.base_score is not None and evaluation.quote_score is not None:
-            favored_ccy_code: str = (
-                "US"
-                if (evaluation.bias < 0)
-                else ("EZ" if definition.base_ccy == "EUR" else definition.base_ccy or "US")
-            )
-            annotated = annotate_thesis_impact(
-                calendar,
-                favored_country=favored_ccy_code,
-                direction_label="BUY" if evaluation.bias > 0 else "SELL",
-            )
-            draft = self.decision_engine.decide_fx_pair(
-                symbol=definition.asset,
-                base_ccy=definition.base_ccy or "",
-                quote_ccy=definition.quote_ccy or "",
-                base_score=evaluation.base_score,
-                quote_score=evaluation.quote_score,
-                bias=evaluation.bias,
-                catalysts=annotated,
-                facts_freshness=facts_freshness,
-            )
-        else:
-            annotated = annotate_thesis_impact(
-                calendar,
-                favored_country="US",
-                direction_label="BUY" if evaluation.bias > 0 else "SELL",
-            )
-            draft = self.decision_engine.decide_single_asset(
-                symbol=definition.asset,
-                score=evaluation.score,
-                catalysts=annotated,
-                facts_freshness=facts_freshness,
-            )
 
         price, price_error = None, None
         try:
@@ -166,8 +149,38 @@ class WeeklyPipeline:
             price_error = str(exc)
 
         return _CandidateBundle(
-            evaluation=evaluation, draft=draft, price=price, price_error=price_error
+            evaluation=evaluation,
+            draft=draft,
+            favored_country=favored_country,
+            price=price,
+            price_error=price_error,
         )
+
+    def _create_monitored_opportunity(
+        self, bundles: list[_CandidateBundle], comparison: WeeklyComparison, recommendation_id: str
+    ) -> None:
+        """Additive-only (V1.1): never affects the BUY/SELL/NO_TRADE
+        recommendation itself. Picks the candidate with the strongest
+        |bias|/|score| among the 3 -- regardless of whether it cleared the
+        trade threshold -- and hands it to the monitor service, which
+        decides (via the same shared criteria `monitor` uses later) whether
+        it's worth persisting as a WAIT/READY_TO_TRADE opportunity at all.
+        """
+        if not bundles:
+            return
+        strongest = max(bundles, key=lambda b: abs(b.evaluation.bias))
+        try:
+            self.monitor_service.create_opportunity(
+                definition=strongest.evaluation.definition,
+                draft=strongest.draft,
+                evaluation_score=strongest.evaluation.bias,
+                favored_country=strongest.favored_country,
+                price=strongest.price,
+                recommendation_id=recommendation_id,
+                data_cutoff=comparison.data_cutoff_utc,
+            )
+        except Exception as exc:  # noqa: BLE001 -- monitoring must never break `weekly`
+            log_event(logger, "monitored_opportunity_creation_failed", error=str(exc))
 
     def _select_winner(self, bundles: list[_CandidateBundle]) -> _CandidateBundle | None:
         tradeable = [b for b in bundles if b.draft.direction is not Direction.NO_TRADE]
@@ -259,7 +272,7 @@ class WeeklyPipeline:
                 order_type = (
                     "CONDITIONAL / PENDING -- do NOT enter until the trigger below confirms; "
                     "this is a planning reference, not an executable order."
-                    if draft.trade_action is TradeAction.WAIT_FOR_TRIGGER
+                    if draft.trade_action is ExecutionReadiness.WAIT_FOR_TRIGGER
                     else "Market or limit at estimated entry (manual, in MT5)"
                 )
                 trade_plan = TradePlan(
@@ -293,7 +306,7 @@ class WeeklyPipeline:
             trade_plan = None  # safety net for the FundamentalDecision validator
 
         final_trade_action = (
-            draft.trade_action if direction is not Direction.NO_TRADE else TradeAction.NONE
+            draft.trade_action if direction is not Direction.NO_TRADE else ExecutionReadiness.NONE
         )
         return FundamentalDecision(
             symbol=definition.asset,
@@ -338,7 +351,7 @@ class WeeklyPipeline:
             symbol="NONE",
             asset_class=AssetClass.FX,
             direction=Direction.NO_TRADE,
-            trade_action=TradeAction.NONE,
+            trade_action=ExecutionReadiness.NONE,
             conviction=0,
             horizon="N/A",
             thesis=(
@@ -359,10 +372,11 @@ class WeeklyPipeline:
             reasons=all_reasons,
         )
 
-    def _journal_entry(self, comparison: WeeklyComparison) -> None:
+    def _journal_entry(self, comparison: WeeklyComparison, recommendation_id: str) -> None:
         d = comparison.decision
         tp = d.trade_plan
         entry = JournalEntry(
+            recommendation_id=recommendation_id,
             generated_at=comparison.generated_at,
             data_cutoff=comparison.data_cutoff_utc,
             asset=d.symbol,

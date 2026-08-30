@@ -67,8 +67,9 @@ app/
   journal/       RecommendationJournal, benchmark export, performance metrics
   reporting/     human-readable report + machine-readable JSON
   llm/           optional Claude synthesis layer + strict output validator
+  monitor/       V1.1: keeps a weekly recommendation under fundamental observation (see docs/monitoring.md)
   services/      WeeklyPipeline -- the only module allowed to orchestrate all of the above
-  cli/           `analyze` / `weekly` / `report` / `journal` / `evaluate`
+  cli/           `analyze` / `weekly` / `report` / `journal` / `evaluate` / `monitor`
 tests/
   unit/          one file per module, no real network calls (respx/fixtures)
   integration/   full pipeline + CLI, still no real network calls
@@ -171,12 +172,18 @@ uv run python -m app weekly --candidates EURUSD,GBPUSD,XAUUSD
 uv run python -m app analyze EURUSD                # quick single-asset read (not journaled)
 uv run python -m app report                        # re-print latest recommendation
 uv run python -m app journal                        # list all journaled recommendations
+uv run python -m app journal enter --opportunity-id <id> --price <price>  # manual entry ack (V1.1)
+uv run python -m app journal skip --opportunity-id <id>                  # manual skip ack (V1.1)
+uv run python -m app monitor                        # V1.1: one fundamental re-evaluation pass
 uv run python -m app evaluate --export-csv benchmark.csv --export-jsonl benchmark.jsonl
 ```
 
 `weekly` always compares **exactly 3** finalists, always prints the human
 report (section-26 format) followed by machine-readable JSON, and always
-appends one entry to the journal -- including `NO_TRADE` runs.
+appends one entry to the journal -- including `NO_TRADE` runs. It also
+automatically opens a `MonitoredTradeOpportunity` for its strongest
+candidate (if the fundamental score is interesting enough), so it can be
+kept under observation afterward -- see section 15a and `docs/monitoring.md`.
 
 ## 10. Human-readable output
 
@@ -249,6 +256,34 @@ rejects it (falling back to the deterministic thesis text) if any number
 isn't traceable to what Claude was given. With no key configured, the
 system runs identically minus this optional narrative.
 
+## 15a. V1.1 -- fundamental monitoring & trade alerts
+
+A weekly recommendation doesn't have to end the moment `weekly` finishes.
+`app/monitor/` keeps it under fundamental observation and re-evaluates it
+as new official data actually publishes:
+
+```
+WEEKLY ANALYSIS -> WAITING FOR CATALYST -> REEVALUATE -> READY_TO_TRADE
+                                                       -> CANCELLED
+```
+
+```bash
+uv run python -m app monitor                 # one re-evaluation pass, then exit (not a daemon)
+uv run python -m app monitor --opportunity-id <id>
+uv run python -m app monitor --full-refresh  # bypass the cache, force a real re-fetch
+uv run python -m app journal enter --opportunity-id <id> --price <price>  # manual ack, never sends an order
+uv run python -m app journal skip --opportunity-id <id>
+```
+
+It reuses the exact same decision engine `weekly` uses (no second scoring
+path), evaluates fundamental-only trigger conditions (published-vs-consensus
+economic releases -- never a price, indicator, or chart pattern), and keeps
+`fundamental_bias` (directional lean) strictly separate from `trade_action`
+(operational lifecycle state) -- see `docs/monitoring.md` for the full
+design, the READY_TO_TRADE gate, alerting, persistence, and limitations.
+Same constraints as `weekly`: no auto-execution, no technical analysis, no
+external notification channel wired up yet.
+
 ## 16. How to add a new asset
 
 1. Add an `AssetDefinition` to `app/market/universe.py` (base/quote
@@ -272,7 +307,7 @@ system runs identically minus this optional narrative.
 ## 18. Testing & quality gates
 
 ```bash
-uv run pytest            # 99 tests, no real network calls (respx + fixtures)
+uv run pytest            # 195 tests, no real network calls (respx + fixtures)
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy app
@@ -319,6 +354,10 @@ historical demonstration, not a live command.
 - Currency scoring models are implemented for USD and EUR only; GBP, JPY,
   AUD, CHF, CAD are in the tradable universe list but will raise until
   their indicator sets and scoring are added (section 16 above).
+- The V1.1 monitoring layer (`app/monitor/`, `docs/monitoring.md`) has no
+  external alert channel wired up (console + local JSON file only) and no
+  built-in scheduler -- `python -m app monitor` must be triggered
+  externally (cron, systemd timer, or similar) for periodic checks.
 
 ## 21. Next steps (recommended)
 

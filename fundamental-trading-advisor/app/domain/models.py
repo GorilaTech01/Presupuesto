@@ -18,9 +18,12 @@ from app.domain.enums import (
     CatalystSeverity,
     Direction,
     DriverCategory,
+    ExecutionReadiness,
     Freshness,
+    FundamentalBias,
     ObservationKind,
     TradeAction,
+    TriggerStatus,
 )
 
 
@@ -178,7 +181,7 @@ class FundamentalDecision(BaseModel):
     symbol: str
     asset_class: AssetClass
     direction: Direction
-    trade_action: TradeAction
+    trade_action: ExecutionReadiness
     conviction: int = Field(ge=0, le=100)
     horizon: str
     thesis: str
@@ -224,4 +227,99 @@ class WeeklyComparison(BaseModel):
             raise ValueError(
                 f"weekly comparison must contain exactly 3 finalists, got {len(self.candidates)}"
             )
+        return self
+
+
+# ---------------------------------------------------------------------------
+# V1.1 monitoring layer (docs/monitoring.md)
+# ---------------------------------------------------------------------------
+
+
+class EconomicReleaseSurprise(BaseModel):
+    """A standardized, structured read of one economic release once (or if)
+    it publishes. Never fabricates a consensus: `consensus=None` and
+    `direction_for_currency_or_asset="CONSENSUS_UNAVAILABLE"` together mean
+    exactly that, and callers must treat the surprise as unresolved rather
+    than guessing a direction.
+    """
+
+    indicator: str
+    country: str
+    actual: float | None
+    consensus: float | None
+    previous: float | None
+    revised_previous: float | None
+    absolute_surprise: float | None
+    normalized_surprise: float | None
+    direction_for_currency_or_asset: str
+    materiality: CatalystSeverity
+    published_at: datetime | None
+    source: str
+
+
+class OpportunityHistoryEntry(BaseModel):
+    """One append-only snapshot in a MonitoredTradeOpportunity's
+    `decision_history`. Written every time the opportunity is (re)evaluated,
+    whether or not anything changed, so the full evaluation timeline is
+    auditable -- not just the moments something changed.
+    """
+
+    at: datetime
+    fundamental_bias: FundamentalBias
+    trade_action: TradeAction
+    trigger_status: TriggerStatus
+    conviction: int
+    score: float
+    reason: str
+
+
+class MonitoredTradeOpportunity(BaseModel):
+    """A weekly recommendation kept under fundamental observation so it can
+    be re-evaluated as new data publishes, per docs/monitoring.md.
+
+    `fundamental_bias` and `trade_action` are deliberately separate fields
+    (section 1 of the V1.1 spec): a BEARISH bias can sit at WAIT for weeks.
+    BUY/SELL only becomes an executable direction via `trade_plan`, and only
+    once `trade_action == READY_TO_TRADE`.
+    """
+
+    opportunity_id: str
+    recommendation_id: str
+    created_at: datetime
+    updated_at: datetime
+    asset: str
+    symbol: str
+    fundamental_bias: FundamentalBias
+    trade_action: TradeAction
+    direction: Direction
+    conviction: int = Field(ge=0, le=100)
+    conviction_breakdown: ConvictionBreakdown | None = None
+    original_score: float
+    current_score: float
+    threshold: float
+    horizon: str
+    entry_condition: str
+    catalysts: list[CatalystEvent]
+    fundamental_invalidation: str
+    cancellation_conditions: list[str]
+    time_stop: str
+    valid_until: datetime
+    data_cutoff: datetime
+    last_evaluated_at: datetime
+    next_relevant_event: CatalystEvent | None
+    trigger_status: TriggerStatus
+    readiness_reason: str | None = None
+    cancellation_reason: str | None = None
+    source_snapshot: list[str] = Field(default_factory=list)
+    decision_history: list[OpportunityHistoryEntry] = Field(default_factory=list)
+    trade_plan: TradePlan | None = None
+
+    @model_validator(mode="after")
+    def _ready_requires_plan_cancelled_requires_reason(self) -> MonitoredTradeOpportunity:
+        if self.trade_action is TradeAction.READY_TO_TRADE and self.trade_plan is None:
+            raise ValueError("READY_TO_TRADE opportunities must carry a trade_plan")
+        if self.trade_action is TradeAction.CANCELLED and not self.cancellation_reason:
+            raise ValueError("CANCELLED opportunities must carry a cancellation_reason")
+        if self.trade_action is not TradeAction.READY_TO_TRADE and self.trade_plan is not None:
+            raise ValueError("only READY_TO_TRADE opportunities may carry a trade_plan")
         return self

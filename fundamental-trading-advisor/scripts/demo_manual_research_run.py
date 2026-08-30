@@ -69,9 +69,9 @@ from app.domain.enums import (
     AssetClass,
     CatalystSeverity,
     Direction,
+    ExecutionReadiness,
     Freshness,
     ObservationKind,
-    TradeAction,
 )
 from app.domain.models import CatalystEvent, FactObservation, TradePlan
 from app.fundamental import analysis
@@ -430,7 +430,7 @@ def main() -> None:
         f"\n>>> FINAL SELECTION: {winner_symbol} {winner_draft.direction.value} "
         f"[trade_action={winner_draft.trade_action.value}]"
     )
-    if winner_draft.trade_action is TradeAction.WAIT_FOR_TRIGGER:
+    if winner_draft.trade_action is ExecutionReadiness.WAIT_FOR_TRIGGER:
         print(
             "    NOTE: this is a fundamental BIAS only -- do not enter now. "
             f"Trigger: {winner_draft.entry_condition}"
@@ -457,7 +457,7 @@ def main() -> None:
             order_type = (
                 "CONDITIONAL / PENDING -- do NOT enter until the trigger confirms; "
                 "this is a planning reference, not an executable order."
-                if winner_draft.trade_action is TradeAction.WAIT_FOR_TRIGGER
+                if winner_draft.trade_action is ExecutionReadiness.WAIT_FOR_TRIGGER
                 else "Market or limit at estimated entry (manual, in MT5)"
             )
             plan = TradePlan(
