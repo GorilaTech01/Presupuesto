@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/cache/*
+!data/cache/.gitkeep
+data/journal/*.jsonl
+data/journal/*.csv
+!data/journal/.gitkeep
+data/manual_prices.json
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
